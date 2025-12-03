@@ -105,15 +105,26 @@ class TriggerDetector:
 
     def plot_triggers(self, plot_widget, trigger_samples, color='red'):
         """Draw vertical lines at trigger times."""
+        lines = []
         for sample in trigger_samples:
             time = sample / self.sampling_rate
+            # Make triggers more visible: thicker, brighter
+            if PYQT_VERSION == 6:
+                from PyQt6.QtCore import Qt
+                pen = pg.mkPen(color, width=3, style=Qt.PenStyle.DashLine)
+            else:
+                pen = pg.mkPen(color, width=3, style=2)
+
             line = pg.InfiniteLine(
                 pos=time,
                 angle=90,
-                pen=pg.mkPen(color, width=2, style=Qt.PenStyle.DashLine if PYQT_VERSION == 6 else 2),
-                label='Trigger'
+                pen=pen,
+                label=f'T@{time:.1f}s',
+                labelOpts={'position': 0.95, 'color': (255, 0, 0)}
             )
             plot_widget.addItem(line)
+            lines.append(line)
+        return lines
 
 
 class FilterWorker(QThread):
@@ -1022,24 +1033,25 @@ class AdvancedEEGGUI(QMainWindow):
 
             # Plot new triggers
             if len(self.detected_triggers) > 0:
-                detector.plot_triggers(self.plot_widget, self.detected_triggers, color='red')
+                # Store trigger line references for persistence
+                self.trigger_lines = detector.plot_triggers(self.plot_widget, self.detected_triggers, color='red')
 
                 # Update results label
                 trigger_times = [t / self.sampling_rate for t in self.detected_triggers]
                 result_text = (
-                    f"Detected {len(self.detected_triggers)} triggers\n"
-                    f"First: {trigger_times[0]:.2f}s\n"
-                    f"Last: {trigger_times[-1]:.2f}s"
+                    f"✓ {len(self.detected_triggers)} triggers detected!\n"
+                    f"First: {trigger_times[0]:.1f}s | Last: {trigger_times[-1]:.1f}s\n"
+                    f"Channel: {self.trigger_channel_idx} | Threshold: {self.trigger_threshold:.2f}"
                 )
                 self.trigger_results_label.setText(result_text)
-                self.trigger_results_label.setStyleSheet("color: green; font-size: 9pt; font-weight: bold;")
+                self.trigger_results_label.setStyleSheet("color: #00ff00; font-size: 9pt; font-weight: bold;")
 
-                print(f"Detected {len(self.detected_triggers)} triggers at samples: {self.detected_triggers[:10]}...")
-                self.statusBar().showMessage(f"Detected {len(self.detected_triggers)} triggers")
+                print(f"✓ Detected {len(self.detected_triggers)} triggers at samples: {self.detected_triggers[:10]}...")
+                self.statusBar().showMessage(f"✓ {len(self.detected_triggers)} triggers detected and plotted")
             else:
-                self.trigger_results_label.setText("No triggers detected")
+                self.trigger_results_label.setText("⚠ No triggers detected\nTry adjusting threshold")
                 self.trigger_results_label.setStyleSheet("color: orange; font-size: 9pt;")
-                self.statusBar().showMessage("No triggers detected")
+                self.statusBar().showMessage("No triggers detected - try adjusting threshold")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to detect triggers: {e}")
@@ -1775,10 +1787,16 @@ class AdvancedEEGGUI(QMainWindow):
         
         # Add view range indicator
         self.update_overview_range_indicator()
-        
-        # Auto-range Y axis
-        self.overview_widget.autoRange()
-        self.overview_widget.setXRange(0, max_seconds)
+
+        # FIX: Set Y-range based on data percentiles to avoid huge axes
+        # Use 1st and 99th percentile to ignore outliers
+        y_min = np.percentile(self.overview_data, 1)
+        y_max = np.percentile(self.overview_data, 99)
+        y_range = y_max - y_min
+        y_padding = y_range * 0.1  # 10% padding
+
+        self.overview_widget.setYRange(y_min - y_padding, y_max + y_padding, padding=0)
+        self.overview_widget.setXRange(0, max_seconds, padding=0)
     
     def initialize_plot_curves(self):
         """Initialize or reinitialize persistent plot curves for current channel selection.
@@ -1996,30 +2014,37 @@ class AdvancedEEGGUI(QMainWindow):
         # Convert sample indices to time in seconds for X-axis
         time_axis = time_samples / self.sampling_rate
         
-        # Calculate offset for stacking channels - use a fixed offset based on data statistics
-        # Channel spacing should adapt to data scale and user Y-scale setting
-        if plot_data.size > 0:
-            # Calculate base spacing from data statistics
-            data_std = np.std(plot_data)
-            data_range = np.max(plot_data) - np.min(plot_data)
+        # Calculate channel spacing based on ACTUAL scaled peak-to-peak ranges
+        # FIX: This prevents overlap when channels have very different amplitudes
+        if plot_data.size > 0 and len(self.selected_channels) > 0:
+            # Calculate per-channel peak-to-peak AFTER scaling
+            max_pp_range = 0.0
+            for i in range(min(len(self.selected_channels), plot_data.shape[1])):
+                channel_data = plot_data[:, i]
+                channel_mean = channel_data.mean()
+                channel_data_centered = channel_data - channel_mean
 
-            # Base channel spacing depends on whether data is normalized or raw
-            if data_range < 10:
-                # Normalized/small data: use std-based spacing
-                base_spacing = max(data_std * 6.0, 5.0)
-            else:
-                # Raw data: use range-based spacing
-                base_spacing = max(data_std * 4.0, data_range * 1.5)
+                # Apply Y-scale to get actual plotted amplitude
+                ch_idx = self.selected_channels[i]
+                y_scale = self.channel_y_scales.get(ch_idx, self.base_y_scale)
+                scaled_data = channel_data_centered * y_scale
 
-            # Apply Y-scale factor to channel spacing
-            # This ensures that when user scales Y-axis, channels remain properly separated
-            self.channel_spacing = base_spacing / self.base_y_scale
+                # Get peak-to-peak range after scaling
+                pp_range = scaled_data.max() - scaled_data.min()
+                max_pp_range = max(max_pp_range, pp_range)
+
+            # Add 20% padding to prevent tight overlap
+            self.channel_spacing = max_pp_range * 1.2
+
+            # Ensure minimum spacing
+            min_spacing = 10.0
+            self.channel_spacing = max(self.channel_spacing, min_spacing)
 
             print(f"Channel spacing: {self.channel_spacing:.2f} "
-                  f"(base: {base_spacing:.2f}, Y-scale: {self.base_y_scale:.2f}, "
-                  f"data std: {data_std:.2f}, range: {data_range:.2f})")
+                  f"(max pk-pk: {max_pp_range:.2f}, with 20% padding, "
+                  f"Y-scale: {self.base_y_scale:.2f})")
         else:
-            self.channel_spacing = 1000.0 / self.base_y_scale
+            self.channel_spacing = 100.0
         
         # Update each channel using persistent curves - MAJOR PERFORMANCE IMPROVEMENT!
         # No clearing, no recreating - just update data!
