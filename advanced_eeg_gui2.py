@@ -887,113 +887,98 @@ class AdvancedEEGGUI(QMainWindow):
             self.auto_load_enabled = self.auto_load_checkbox.isChecked()
     
     def on_view_range_changed(self):
-        """Handle ViewBox range changes (when user pans/zooms)."""
+        """Handle ViewBox range changes (when user pans/zooms).
+        Based on Neuron.m Timeklik scroller behavior."""
         if not self.auto_load_enabled or self.updating_view:
             return
-        
+
         # Debounce: restart timer every time range changes
         # This prevents loading while user is actively panning
+        # Similar to Neuron.m's scroll handling with shift calculation
         if self.range_update_timer:
             self.range_update_timer.stop()
-            self.range_update_timer.start(300)  # Wait 300ms after user stops panning
-        
+            self.range_update_timer.start(200)  # Wait 200ms after user stops panning
+
         # Update overview range indicator immediately for responsive feedback
         if hasattr(self, 'overview_widget') and self.overview_loaded:
             self.update_overview_range_indicator()
     
     def check_and_load_new_data(self):
-        """Check if visible range is outside loaded data and load if needed."""
+        """Check if visible range is outside loaded data and load if needed.
+        Handles coordinate conversion between seconds (ViewBox) and samples (data)."""
         if not self.auto_load_enabled or self.loader is None or not self.selected_channels:
             return
-        
+
         try:
             vb = self.plot_widget.getViewBox()
             if vb is None:
                 return
-            
-            # Get current visible X range (in seconds, since we're plotting in seconds)
-            visible_range = vb.viewRange()[0]  # [x_min, x_max] in seconds
-            visible_start_sec = visible_range[0]
-            visible_end_sec = visible_range[1]
-            
-            # Convert from seconds to sample indices
-            visible_start = int(visible_start_sec * self.sampling_rate)
-            visible_end = int(visible_end_sec * self.sampling_rate)
-            
-            # Clamp to valid range
+
+            # === STEP 1: Get visible range in ViewBox coordinates (seconds) ===
+            x_range_sec = vb.viewRange()[0]  # [x_min, x_max] in seconds
+            visible_start_sec = x_range_sec[0]
+            visible_end_sec = x_range_sec[1]
+
+            # === STEP 2: Convert to sample indices ===
+            visible_start_sample = int(visible_start_sec * self.sampling_rate)
+            visible_end_sample = int(visible_end_sec * self.sampling_rate)
+
+            # Clamp to valid data range
             max_samples = self.loader.num_samples_per_channel
-            visible_start = max(0, min(visible_start, max_samples))
-            visible_end = max(0, min(visible_end, max_samples))
-            
-            if visible_end <= visible_start:
+            visible_start_sample = max(0, min(visible_start_sample, max_samples))
+            visible_end_sample = max(0, min(visible_end_sample, max_samples))
+
+            if visible_end_sample <= visible_start_sample:
                 return
-            
-            # Enforce minimum window size to prevent loading single samples
-            visible_range_size = visible_end - visible_start
-            min_window_size = 100  # Minimum samples to display
-            
-            if visible_range_size < min_window_size:
+
+            # === STEP 3: Calculate window size and enforce minimum ===
+            visible_window_samples = visible_end_sample - visible_start_sample
+            min_window_samples = 100  # Minimum samples to display
+
+            if visible_window_samples < min_window_samples:
                 # Expand to minimum size, centered on current view
-                center = (visible_start + visible_end) / 2
-                visible_start = max(0, int(center - min_window_size / 2))
-                visible_end = min(max_samples, visible_start + min_window_size)
-                visible_range_size = visible_end - visible_start
-            
-            # Calculate buffer size (50% of visible range on each side)
-            buffer_size = int(visible_range_size * self.load_buffer_ratio)
-            
-            # Calculate desired load range (with buffer)
-            desired_start = max(0, visible_start - buffer_size)
-            desired_end = min(max_samples, visible_end + buffer_size)
-            
-            # Check if we need to load new data
+                center_sample = (visible_start_sample + visible_end_sample) // 2
+                visible_start_sample = max(0, center_sample - min_window_samples // 2)
+                visible_end_sample = min(max_samples, visible_start_sample + min_window_samples)
+                visible_window_samples = visible_end_sample - visible_start_sample
+
+            # === STEP 4: Calculate buffer size (50% on each side) ===
+            buffer_samples = int(visible_window_samples * self.load_buffer_ratio)
+
+            # === STEP 5: Calculate desired load range with buffer ===
+            desired_load_start = max(0, visible_start_sample - buffer_samples)
+            desired_load_end = min(max_samples, visible_end_sample + buffer_samples)
+
+            # === STEP 6: Check if we need to load new data ===
             need_load = False
-            margin = max(visible_range_size * 0.1, 1000)  # 10% margin, but at least 1000 samples
-            
-            # Also reload if resolution needs change significantly (when zooming in/out)
-            # If we're zoomed in very close, we need full resolution data
-            current_loaded_range = self.loaded_end_sample - self.loaded_start_sample
-            resolution_needs_reload = False
-            
-            # Check if we need to reload for better resolution
-            visible_range_seconds = visible_range_size / self.sampling_rate
-            
-            if visible_range_seconds < 2.0 and current_loaded_range > visible_range_size * 5:
-                # Zoomed in close (< 2 seconds) but have too much buffered data - reload for full resolution
-                resolution_needs_reload = True
-            elif visible_range_seconds > 60.0 and current_loaded_range < visible_range_size * 2:
-                # Zoomed out far (> 60 seconds) and need more data
-                resolution_needs_reload = True
-            
-            if (desired_start < self.loaded_start_sample - margin or 
-                desired_end > self.loaded_end_sample + margin or
-                resolution_needs_reload):
+            margin_samples = max(int(visible_window_samples * 0.1), 1000)  # 10% margin, min 1000 samples
+
+            # Check if visible range extends beyond loaded data (with margin)
+            if (desired_load_start < self.loaded_start_sample - margin_samples or
+                desired_load_end > self.loaded_end_sample + margin_samples):
                 need_load = True
-            
+                print(f"Auto-load triggered: visible beyond loaded range")
+
+            # === STEP 7: Load new data if needed ===
             if need_load:
-                print(f"Auto-loading: visible=[{visible_start:,}, {visible_end:,}], "
-                      f"loading=[{desired_start:,}, {desired_end:,}]")
-                
-                # Update loaded range tracking
-                self.loaded_start_sample = desired_start
-                self.loaded_end_sample = desired_end
-                
-                # Update navigation controls to match visible range (but don't trigger reload)
-                # The view will update automatically when data is loaded
-                self.start_sample = visible_start
-                self.end_sample = visible_end
-                
-                # Load data with buffer
-                self.load_and_update_view_range(desired_start, desired_end, visible_start, visible_end)
-                
-                # Update navigation controls after loading to reflect actual loaded range
+                print(f"Auto-loading data: visible=[{visible_start_sample:,}, {visible_end_sample:,}] samples "
+                      f"({visible_start_sec:.2f}-{visible_end_sec:.2f} s), "
+                      f"loading=[{desired_load_start:,}, {desired_load_end:,}] samples")
+
+                # Load data with buffer, display visible portion
+                self.load_and_update_view_range(
+                    desired_load_start, desired_load_end,
+                    visible_start_sample, visible_end_sample
+                )
+
+                # Update navigation controls
                 self.start_sample_spin.blockSignals(True)
                 self.end_sample_spin.blockSignals(True)
-                self.start_sample_spin.setValue(visible_start)
-                self.end_sample_spin.setValue(visible_end)
+                self.start_sample_spin.setValue(visible_start_sample)
+                self.end_sample_spin.setValue(visible_end_sample)
                 self.start_sample_spin.blockSignals(False)
                 self.end_sample_spin.blockSignals(False)
-        
+
         except Exception as e:
             print(f"Error in check_and_load_new_data: {e}")
             import traceback
@@ -1199,95 +1184,99 @@ class AdvancedEEGGUI(QMainWindow):
     # ==================== Scale Control Methods ====================
     
     def increase_x_scale(self):
-        """Increase X-axis (time) scale (zoom in)."""
+        """Increase X-axis (time) scale (zoom in) - similar to Neuron.m timegain."""
         self.x_scale_factor *= 1.5
         self.x_scale_label.setText(f"{self.x_scale_factor:.2f}x")
         self.apply_x_scale()
-    
+
     def decrease_x_scale(self):
-        """Decrease X-axis (time) scale (zoom out)."""
+        """Decrease X-axis (time) scale (zoom out) - similar to Neuron.m timegain."""
         self.x_scale_factor /= 1.5
         if self.x_scale_factor < 0.1:
             self.x_scale_factor = 0.1
         self.x_scale_label.setText(f"{self.x_scale_factor:.2f}x")
         self.apply_x_scale()
-    
+
     def apply_x_scale(self):
-        """Apply X-scale factor to current view."""
-        if self.loader is None:
+        """Apply X-scale factor to current view - zoom in/out on time axis.
+        Based on Neuron.m zoom behavior: scale the visible window width around center."""
+        if self.loader is None or self.current_data is None:
             return
-        
+
         vb = self.plot_widget.getViewBox()
         if vb is None:
             return
-        
-        # Get current center and range
+
+        # Get current visible range (in seconds)
         x_range = vb.viewRange()[0]
         current_center = (x_range[0] + x_range[1]) / 2
         current_width = x_range[1] - x_range[0]
-        
-        # Scale the width (current_width is in seconds)
-        new_width = current_width / self.x_scale_factor
-        
-        # Enforce minimum window size (in seconds)
-        min_width_sec = 0.05  # Minimum 50ms window
-        if new_width < min_width_sec:
-            new_width = min_width_sec
-        
+
+        # Calculate new width by dividing by scale factor
+        # (scale_factor > 1 means zoom in, so width decreases)
+        new_width = current_width / 1.5  # Fixed zoom step
+
+        # Enforce reasonable bounds
         max_seconds = self.loader.num_samples_per_channel / self.sampling_rate
-        new_start_sec = max(0, current_center - new_width / 2)
-        new_end_sec = min(max_seconds, current_center + new_width / 2)
-        
-        # Update stored values (convert back to samples)
-        self.start_sample = int(new_start_sec * self.sampling_rate)
-        self.end_sample = int(new_end_sec * self.sampling_rate)
-        
-        # Set new range - this will trigger auto-loading if needed
+        min_width_sec = 10 / self.sampling_rate  # At least 10 samples
+        max_width_sec = max_seconds
+
+        new_width = max(min_width_sec, min(max_width_sec, new_width))
+
+        # Calculate new range centered on current center
+        new_start_sec = current_center - new_width / 2
+        new_end_sec = current_center + new_width / 2
+
+        # Clamp to valid range
+        if new_start_sec < 0:
+            new_start_sec = 0
+            new_end_sec = min(new_width, max_seconds)
+        elif new_end_sec > max_seconds:
+            new_end_sec = max_seconds
+            new_start_sec = max(0, max_seconds - new_width)
+
+        # Set new range in ViewBox
         self.updating_view = True
         vb.setXRange(new_start_sec, new_end_sec, padding=0)
         self.updating_view = False
-        
-        # Update spin boxes
+
+        # Update stored sample values
+        self.start_sample = int(new_start_sec * self.sampling_rate)
+        self.end_sample = int(new_end_sec * self.sampling_rate)
+
+        # Update spin boxes without triggering signals
         self.start_sample_spin.blockSignals(True)
         self.end_sample_spin.blockSignals(True)
         self.start_sample_spin.setValue(self.start_sample)
         self.end_sample_spin.setValue(self.end_sample)
         self.start_sample_spin.blockSignals(False)
         self.end_sample_spin.blockSignals(False)
-        
-        # Trigger reload with adaptive resolution
-        if self.auto_load_enabled:
-            # Trigger check after a short delay to allow view to update
-            if self.range_update_timer:
-                self.range_update_timer.stop()
-                self.range_update_timer.start(100)  # Shorter delay for scale changes
+
+        # Trigger data reload if needed (with debounce)
+        if self.auto_load_enabled and self.range_update_timer:
+            self.range_update_timer.stop()
+            self.range_update_timer.start(100)
     
     def increase_y_scale(self):
-        """Increase Y-axis (amplitude) scale for all channels."""
+        """Increase Y-axis (amplitude) scale for all channels.
+        Based on Neuron.m file.scale: scales amplitude to make features larger."""
         self.base_y_scale *= 1.5
         self.y_scale_label.setText(f"{self.base_y_scale:.2f}x")
-        # Update all channel scales
+        # Sync all channel scales to base scale
         for ch_idx in self.selected_channels:
-            if ch_idx not in self.channel_y_scales:
-                self.channel_y_scales[ch_idx] = self.base_y_scale
-            else:
-                self.channel_y_scales[ch_idx] *= 1.5
+            self.channel_y_scales[ch_idx] = self.base_y_scale
         self.update_time_series_view()
-    
+
     def decrease_y_scale(self):
-        """Decrease Y-axis (amplitude) scale for all channels."""
+        """Decrease Y-axis (amplitude) scale for all channels.
+        Based on Neuron.m file.scale: scales amplitude to make features smaller."""
         self.base_y_scale /= 1.5
         if self.base_y_scale < 0.1:
             self.base_y_scale = 0.1
         self.y_scale_label.setText(f"{self.base_y_scale:.2f}x")
-        # Update all channel scales
+        # Sync all channel scales to base scale
         for ch_idx in self.selected_channels:
-            if ch_idx not in self.channel_y_scales:
-                self.channel_y_scales[ch_idx] = self.base_y_scale
-            else:
-                self.channel_y_scales[ch_idx] /= 1.5
-                if self.channel_y_scales[ch_idx] < 0.1:
-                    self.channel_y_scales[ch_idx] = 0.1
+            self.channel_y_scales[ch_idx] = self.base_y_scale
         self.update_time_series_view()
     
     # ==================== Overview Widget Methods ====================
@@ -1552,22 +1541,30 @@ class AdvancedEEGGUI(QMainWindow):
         # Convert sample indices to time in seconds for X-axis
         time_axis = time_samples / self.sampling_rate
         
-        # Calculate offset for stacking channels - use a fixed offset based on data std
-        # This is more reliable than using data range
+        # Calculate offset for stacking channels - use a fixed offset based on data statistics
+        # Channel spacing should adapt to data scale and user Y-scale setting
         if plot_data.size > 0:
-            # Use standard deviation to determine reasonable offset
-            # But handle the case where data is very small (e.g., after normalization)
+            # Calculate base spacing from data statistics
             data_std = np.std(plot_data)
             data_range = np.max(plot_data) - np.min(plot_data)
-            
-            # Calculate channel spacing based on data characteristics
+
+            # Base channel spacing depends on whether data is normalized or raw
             if data_range < 10:
-                self.channel_spacing = max(data_std * 6.0, 5.0)  # Larger spacing for normalized data
+                # Normalized/small data: use std-based spacing
+                base_spacing = max(data_std * 6.0, 5.0)
             else:
-                self.channel_spacing = max(data_std * 4.0, data_range * 1.5)  # Spacing for raw data
-            print(f"Using channel spacing: {self.channel_spacing:.2f} (data std: {data_std:.2f}, data range: {data_range:.2f})")
+                # Raw data: use range-based spacing
+                base_spacing = max(data_std * 4.0, data_range * 1.5)
+
+            # Apply Y-scale factor to channel spacing
+            # This ensures that when user scales Y-axis, channels remain properly separated
+            self.channel_spacing = base_spacing / self.base_y_scale
+
+            print(f"Channel spacing: {self.channel_spacing:.2f} "
+                  f"(base: {base_spacing:.2f}, Y-scale: {self.base_y_scale:.2f}, "
+                  f"data std: {data_std:.2f}, range: {data_range:.2f})")
         else:
-            self.channel_spacing = 1000.0
+            self.channel_spacing = 1000.0 / self.base_y_scale
         
         # Plot each channel
         # Generate colors - use color names for maximum visibility on black background
