@@ -64,6 +64,69 @@ import json
 from datetime import datetime
 
 
+class TriggerDetector:
+    """Detect trigger pulses for seizure markers with refractory period (Quick Win #3)."""
+
+    def __init__(self, threshold=0.5, refractory_seconds=21.0, sampling_rate=200.0):
+        self.threshold = threshold
+        self.refractory_samples = int(refractory_seconds * sampling_rate)
+        self.sampling_rate = sampling_rate
+        self.detected_triggers = []
+
+    def detect(self, trigger_channel_data, start_sample=0):
+        """
+        Detect triggers with refractory period.
+
+        Args:
+            trigger_channel_data: 1D array of trigger channel
+            start_sample: Offset for sample indices
+
+        Returns:
+            List of trigger sample indices
+        """
+        # Threshold crossing detection
+        above = trigger_channel_data > self.threshold
+
+        # Find rising edges
+        rising = np.diff(above.astype(int)) > 0
+        trigger_samples = np.where(rising)[0] + start_sample
+
+        # Apply refractory period
+        if len(trigger_samples) == 0:
+            return []
+
+        filtered_triggers = [trigger_samples[0]]
+
+        for trigger in trigger_samples[1:]:
+            if trigger - filtered_triggers[-1] >= self.refractory_samples:
+                filtered_triggers.append(trigger)
+
+        return filtered_triggers
+
+    def plot_triggers(self, plot_widget, trigger_samples, color='red'):
+        """Draw vertical lines at trigger times."""
+        lines = []
+        for sample in trigger_samples:
+            time = sample / self.sampling_rate
+            # Make triggers more visible: thicker, brighter
+            if PYQT_VERSION == 6:
+                from PyQt6.QtCore import Qt
+                pen = pg.mkPen(color, width=3, style=Qt.PenStyle.DashLine)
+            else:
+                pen = pg.mkPen(color, width=3, style=2)
+
+            line = pg.InfiniteLine(
+                pos=time,
+                angle=90,
+                pen=pen,
+                label=f'T@{time:.1f}s',
+                labelOpts={'position': 0.95, 'color': (255, 0, 0)}
+            )
+            plot_widget.addItem(line)
+            lines.append(line)
+        return lines
+
+
 class FilterWorker(QThread):
     """Worker thread for filtering operations to keep GUI responsive."""
     finished = pyqtSignal(np.ndarray)
@@ -173,7 +236,21 @@ class AdvancedEEGGUI(QMainWindow):
         self.overview_channel: Optional[int] = None  # Channel to show in overview
         self.overview_data: Optional[np.ndarray] = None  # Downsampled overview data
         self.overview_loaded: bool = False  # Whether overview has been loaded
-        
+
+        # Persistent curves for optimized plotting (Quick Win #1)
+        self.plot_curves: Dict[int, Any] = {}  # Store curve objects by channel index
+        self.current_channel_order: List[int] = []  # Track current channel display order
+
+        # Trigger detection (Quick Win #3)
+        self.trigger_channel_idx: Optional[int] = None
+        self.trigger_threshold: float = 0.5
+        self.trigger_refractory: float = 21.0
+        self.detected_triggers: List[int] = []
+        self.trigger_lines: List[Any] = []  # Store trigger line references
+
+        # Bad channels (Quick Win #4)
+        self.bad_channels: set = set()
+
         # Initialize UI
         self.init_ui()
         
@@ -283,7 +360,11 @@ class AdvancedEEGGUI(QMainWindow):
         # Processing section
         process_group = self.create_processing_group()
         scroll_layout.addWidget(process_group)
-        
+
+        # Trigger detection section (Quick Win #3)
+        trigger_group = self.create_trigger_detection_group()
+        scroll_layout.addWidget(trigger_group)
+
         # Export section
         export_group = self.create_export_group()
         scroll_layout.addWidget(export_group)
@@ -327,6 +408,15 @@ class AdvancedEEGGUI(QMainWindow):
         self.channel_list = QListWidget()
         self.channel_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.channel_list.itemSelectionChanged.connect(self.on_channel_selection_changed)
+
+        # Add context menu for bad channel marking (Quick Win #4)
+        if PYQT_VERSION == 6:
+            self.channel_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        else:
+            from PyQt5.QtCore import Qt as Qt5
+            self.channel_list.setContextMenuPolicy(Qt5.CustomContextMenu)
+        self.channel_list.customContextMenuRequested.connect(self.show_channel_context_menu)
+
         layout.addWidget(self.channel_list)
         
         # Channel buttons
@@ -534,6 +624,60 @@ class AdvancedEEGGUI(QMainWindow):
         group.setLayout(layout)
         return group
     
+    def create_trigger_detection_group(self) -> QGroupBox:
+        """Create trigger detection controls group (Quick Win #3)."""
+        group = QGroupBox("Trigger Detection")
+        layout = QVBoxLayout()
+
+        # Trigger channel selection
+        ch_layout = QHBoxLayout()
+        ch_layout.addWidget(QLabel("Trigger Channel:"))
+        self.trigger_channel_spin = QSpinBox()
+        self.trigger_channel_spin.setMaximum(71)
+        self.trigger_channel_spin.setValue(0)
+        ch_layout.addWidget(self.trigger_channel_spin)
+        layout.addLayout(ch_layout)
+
+        # Threshold
+        thresh_layout = QHBoxLayout()
+        thresh_layout.addWidget(QLabel("Threshold:"))
+        self.trigger_threshold_spin = QDoubleSpinBox()
+        self.trigger_threshold_spin.setRange(0.0, 10.0)
+        self.trigger_threshold_spin.setValue(0.5)
+        self.trigger_threshold_spin.setSingleStep(0.1)
+        self.trigger_threshold_spin.setDecimals(2)
+        thresh_layout.addWidget(self.trigger_threshold_spin)
+        layout.addLayout(thresh_layout)
+
+        # Refractory period
+        refrac_layout = QHBoxLayout()
+        refrac_layout.addWidget(QLabel("Refractory (s):"))
+        self.refractory_spin = QDoubleSpinBox()
+        self.refractory_spin.setRange(0.0, 60.0)
+        self.refractory_spin.setValue(21.0)
+        self.refractory_spin.setDecimals(1)
+        refrac_layout.addWidget(self.refractory_spin)
+        layout.addLayout(refrac_layout)
+
+        # Detect button
+        detect_btn = QPushButton("Detect Triggers")
+        detect_btn.clicked.connect(self.detect_and_plot_triggers)
+        layout.addWidget(detect_btn)
+
+        # Clear triggers button
+        clear_triggers_btn = QPushButton("Clear Triggers")
+        clear_triggers_btn.clicked.connect(self.clear_triggers)
+        layout.addWidget(clear_triggers_btn)
+
+        # Results label
+        self.trigger_results_label = QLabel("No triggers detected")
+        self.trigger_results_label.setWordWrap(True)
+        self.trigger_results_label.setStyleSheet("color: gray; font-size: 9pt;")
+        layout.addWidget(self.trigger_results_label)
+
+        group.setLayout(layout)
+        return group
+
     def create_export_group(self) -> QGroupBox:
         """Create export controls group."""
         group = QGroupBox("Export")
@@ -742,6 +886,191 @@ class AdvancedEEGGUI(QMainWindow):
         
         return widget
     
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts for navigation and controls (Quick Win #2)."""
+        from PyQt6.QtCore import Qt
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # Navigation shortcuts
+        if key == Qt.Key.Key_Left:
+            if modifiers == Qt.KeyboardModifier.ShiftModifier:
+                self.navigate_time(-10000)  # Shift+Left: -10k samples
+            else:
+                self.navigate_time(-1000)   # Left: -1k samples
+
+        elif key == Qt.Key.Key_Right:
+            if modifiers == Qt.KeyboardModifier.ShiftModifier:
+                self.navigate_time(10000)   # Shift+Right: +10k samples
+            else:
+                self.navigate_time(1000)    # Right: +1k samples
+
+        # Zoom shortcuts (X-axis)
+        elif key == Qt.Key.Key_Plus or key == Qt.Key.Key_Equal:
+            self.increase_x_scale()
+        elif key == Qt.Key.Key_Minus:
+            self.decrease_x_scale()
+
+        # Amplitude shortcuts (Y-axis)
+        elif key == Qt.Key.Key_Up:
+            self.increase_y_scale()
+        elif key == Qt.Key.Key_Down:
+            self.decrease_y_scale()
+
+        # Mark annotation (Space bar)
+        elif key == Qt.Key.Key_Space:
+            self.quick_mark_annotation()
+
+        # Toggle bad channel (B key)
+        elif key == Qt.Key.Key_B:
+            self.toggle_selected_channel_bad()
+
+        # Home/End navigation
+        elif key == Qt.Key.Key_Home:
+            self.go_to_start()
+        elif key == Qt.Key.Key_End:
+            self.go_to_end()
+
+        # Refresh view (R key)
+        elif key == Qt.Key.Key_R:
+            if modifiers == Qt.KeyboardModifier.ControlModifier:
+                self.reset_view()
+            else:
+                self.load_and_update_view()
+
+        else:
+            super().keyPressEvent(event)
+
+        print(f"Keyboard shortcut: {event.text() or event.key()}")
+
+    def quick_mark_annotation(self):
+        """Quick annotation marking at current view center (Space bar shortcut)."""
+        if self.loader is None:
+            print("No data loaded - cannot mark annotation")
+            return
+
+        # Get current view center
+        vb = self.plot_widget.getViewBox()
+        if vb:
+            x_range = vb.viewRange()[0]
+            center_sec = (x_range[0] + x_range[1]) / 2
+            center_sample = int(center_sec * self.sampling_rate)
+
+            print(f"Marked annotation at {center_sec:.2f}s (sample {center_sample})")
+            # TODO: Add to annotation list when annotation system is implemented
+            self.statusBar().showMessage(f"Annotation marked at {center_sec:.2f}s")
+
+    def toggle_selected_channel_bad(self):
+        """Toggle bad channel status for currently selected channels (B key shortcut)."""
+        if not hasattr(self, 'bad_channels'):
+            self.bad_channels = set()
+
+        if not self.selected_channels:
+            print("No channels selected")
+            return
+
+        # Toggle first selected channel
+        ch_idx = self.selected_channels[0]
+        if ch_idx in self.bad_channels:
+            self.bad_channels.remove(ch_idx)
+            print(f"Channel {ch_idx} marked as GOOD")
+            self.statusBar().showMessage(f"Channel {ch_idx} marked as GOOD")
+        else:
+            self.bad_channels.add(ch_idx)
+            print(f"Channel {ch_idx} marked as BAD")
+            self.statusBar().showMessage(f"Channel {ch_idx} marked as BAD")
+
+        # Update visual indication in channel list
+        item = self.channel_list.item(ch_idx)
+        if item and ch_idx in self.bad_channels:
+            if PYQT_VERSION == 6:
+                item.setForeground(Qt.GlobalColor.red)
+            else:
+                from PyQt5.QtGui import QColor
+                item.setForeground(QColor('red'))
+            item.setText(f"Channel {ch_idx:3d} [BAD]")
+        elif item:
+            if PYQT_VERSION == 6:
+                item.setForeground(Qt.GlobalColor.white)
+            else:
+                from PyQt5.QtGui import QColor
+                item.setForeground(QColor('white'))
+            item.setText(f"Channel {ch_idx:3d}")
+
+    def detect_and_plot_triggers(self):
+        """Detect triggers and show them on plot (Quick Win #3)."""
+        if self.loader is None:
+            QMessageBox.warning(self, "Warning", "No data loaded")
+            return
+
+        # Get parameters
+        self.trigger_channel_idx = self.trigger_channel_spin.value()
+        self.trigger_threshold = self.trigger_threshold_spin.value()
+        self.trigger_refractory = self.refractory_spin.value()
+
+        try:
+            # Load entire trigger channel for detection
+            max_samples = self.loader.num_samples_per_channel
+            trigger_data = self.loader.load_channels(
+                [self.trigger_channel_idx],
+                start_sample=0,
+                end_sample=max_samples,
+                dtype=np.float32
+            )[:, 0]
+
+            # Detect triggers
+            detector = TriggerDetector(
+                threshold=self.trigger_threshold,
+                refractory_seconds=self.trigger_refractory,
+                sampling_rate=self.sampling_rate
+            )
+
+            self.detected_triggers = detector.detect(trigger_data, start_sample=0)
+
+            # Clear old trigger lines
+            self.clear_triggers()
+
+            # Plot new triggers
+            if len(self.detected_triggers) > 0:
+                # Store trigger line references for persistence
+                self.trigger_lines = detector.plot_triggers(self.plot_widget, self.detected_triggers, color='red')
+
+                # Update results label
+                trigger_times = [t / self.sampling_rate for t in self.detected_triggers]
+                result_text = (
+                    f"✓ {len(self.detected_triggers)} triggers detected!\n"
+                    f"First: {trigger_times[0]:.1f}s | Last: {trigger_times[-1]:.1f}s\n"
+                    f"Channel: {self.trigger_channel_idx} | Threshold: {self.trigger_threshold:.2f}"
+                )
+                self.trigger_results_label.setText(result_text)
+                self.trigger_results_label.setStyleSheet("color: #00ff00; font-size: 9pt; font-weight: bold;")
+
+                print(f"✓ Detected {len(self.detected_triggers)} triggers at samples: {self.detected_triggers[:10]}...")
+                self.statusBar().showMessage(f"✓ {len(self.detected_triggers)} triggers detected and plotted")
+            else:
+                self.trigger_results_label.setText("⚠ No triggers detected\nTry adjusting threshold")
+                self.trigger_results_label.setStyleSheet("color: orange; font-size: 9pt;")
+                self.statusBar().showMessage("No triggers detected - try adjusting threshold")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to detect triggers: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def clear_triggers(self):
+        """Clear all trigger markers from plot."""
+        # Remove all InfiniteLine items (trigger markers)
+        for item in self.plot_widget.getPlotItem().items[:]:
+            if isinstance(item, pg.InfiniteLine):
+                self.plot_widget.removeItem(item)
+
+        self.trigger_lines.clear()
+        self.detected_triggers.clear()
+        self.trigger_results_label.setText("No triggers detected")
+        self.trigger_results_label.setStyleSheet("color: gray; font-size: 9pt;")
+        print("Cleared all trigger markers")
+
     def auto_load_data(self):
         """Try to automatically load continuous.dat if it exists."""
         dat_file = Path("continuous.dat")
@@ -830,6 +1159,110 @@ class AdvancedEEGGUI(QMainWindow):
             traceback.print_exc()
             self.statusBar().showMessage("Error loading file")
     
+    def show_channel_context_menu(self, position):
+        """Show context menu for channel list (Quick Win #4)."""
+        item = self.channel_list.itemAt(position)
+        if item is None:
+            return
+
+        channel_idx = self.channel_list.row(item)
+
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu()
+
+        # Mark as bad/good action
+        if channel_idx in self.bad_channels:
+            mark_action = menu.addAction("✓ Mark as Good")
+        else:
+            mark_action = menu.addAction("⚠ Mark as Bad")
+
+        # Hide channel action
+        hide_action = menu.addAction("👁 Hide Channel")
+
+        # Show info action
+        info_action = menu.addAction("ℹ Show Channel Info")
+
+        # Execute menu
+        action = menu.exec(self.channel_list.mapToGlobal(position))
+
+        if action == mark_action:
+            self.toggle_channel_bad(channel_idx)
+        elif action == hide_action:
+            self.hide_channel(channel_idx)
+        elif action == info_action:
+            self.show_channel_info(channel_idx)
+
+    def toggle_channel_bad(self, channel_idx: int):
+        """Toggle bad channel status for a specific channel."""
+        if channel_idx in self.bad_channels:
+            self.bad_channels.remove(channel_idx)
+            print(f"Channel {channel_idx} marked as GOOD")
+            self.statusBar().showMessage(f"Channel {channel_idx} marked as GOOD")
+        else:
+            self.bad_channels.add(channel_idx)
+            print(f"Channel {channel_idx} marked as BAD")
+            self.statusBar().showMessage(f"Channel {channel_idx} marked as BAD")
+
+        # Update visual indication in channel list
+        item = self.channel_list.item(channel_idx)
+        if item:
+            if channel_idx in self.bad_channels:
+                if PYQT_VERSION == 6:
+                    from PyQt6.QtCore import Qt
+                    item.setForeground(Qt.GlobalColor.red)
+                else:
+                    from PyQt5.QtGui import QColor
+                    item.setForeground(QColor('red'))
+                item.setText(f"Channel {channel_idx:3d} [BAD]")
+            else:
+                if PYQT_VERSION == 6:
+                    from PyQt6.QtCore import Qt
+                    item.setForeground(Qt.GlobalColor.white)
+                else:
+                    from PyQt5.QtGui import QColor
+                    item.setForeground(QColor('white'))
+                item.setText(f"Channel {channel_idx:3d}")
+
+        # Redraw if channel is currently displayed
+        if channel_idx in self.selected_channels:
+            self.update_time_series_view()
+
+    def hide_channel(self, channel_idx: int):
+        """Hide a channel from display."""
+        if channel_idx in self.selected_channels:
+            # Remove from selected channels
+            self.selected_channels.remove(channel_idx)
+            # Update UI
+            item = self.channel_list.item(channel_idx)
+            if item:
+                item.setSelected(False)
+            self.on_channel_selection_changed()
+            print(f"Channel {channel_idx} hidden")
+            self.statusBar().showMessage(f"Channel {channel_idx} hidden")
+        else:
+            print(f"Channel {channel_idx} is not currently displayed")
+
+    def show_channel_info(self, channel_idx: int):
+        """Show information about a channel."""
+        if self.loader is None:
+            return
+
+        info_text = f"Channel {channel_idx}\n"
+        info_text += f"Status: {'BAD' if channel_idx in self.bad_channels else 'GOOD'}\n"
+        info_text += f"Displayed: {'Yes' if channel_idx in self.selected_channels else 'No'}\n"
+
+        if self.current_data is not None and channel_idx in self.selected_channels:
+            ch_data_idx = self.selected_channels.index(channel_idx)
+            if ch_data_idx < self.current_data.shape[1]:
+                ch_data = self.current_data[:, ch_data_idx]
+                info_text += f"\nData Statistics:\n"
+                info_text += f"Mean: {ch_data.mean():.2f}\n"
+                info_text += f"Std: {ch_data.std():.2f}\n"
+                info_text += f"Min: {ch_data.min():.2f}\n"
+                info_text += f"Max: {ch_data.max():.2f}"
+
+        QMessageBox.information(self, f"Channel {channel_idx} Info", info_text)
+
     def on_channel_selection_changed(self):
         """Handle channel selection changes."""
         selected_items = self.channel_list.selectedItems()
@@ -1354,11 +1787,50 @@ class AdvancedEEGGUI(QMainWindow):
         
         # Add view range indicator
         self.update_overview_range_indicator()
-        
-        # Auto-range Y axis
-        self.overview_widget.autoRange()
-        self.overview_widget.setXRange(0, max_seconds)
+
+        # FIX: Set Y-range based on data percentiles to avoid huge axes
+        # Use 1st and 99th percentile to ignore outliers
+        y_min = np.percentile(self.overview_data, 1)
+        y_max = np.percentile(self.overview_data, 99)
+        y_range = y_max - y_min
+        y_padding = y_range * 0.1  # 10% padding
+
+        self.overview_widget.setYRange(y_min - y_padding, y_max + y_padding, padding=0)
+        self.overview_widget.setXRange(0, max_seconds, padding=0)
     
+    def initialize_plot_curves(self):
+        """Initialize or reinitialize persistent plot curves for current channel selection.
+        Only recreates curves when channel selection changes - MAJOR PERFORMANCE WIN!"""
+        # Check if channel selection has changed
+        if self.selected_channels == self.current_channel_order:
+            return  # No change, keep existing curves
+
+        print(f"Initializing persistent curves for {len(self.selected_channels)} channels")
+
+        # Clear old curves
+        self.plot_widget.clear()
+        self.plot_curves.clear()
+
+        # Color palette
+        color_palette = ['w', 'r', 'g', 'b', 'c', 'm', 'y', '#FFA500', '#FF00FF', '#00FFFF']
+
+        # Create new curves
+        for i, ch_idx in enumerate(self.selected_channels):
+            color = color_palette[i % len(color_palette)]
+            pen = pg.mkPen(color=color, width=3)
+
+            # Create curve once - this is the key optimization!
+            curve = pg.PlotDataItem(
+                pen=pen,
+                name=f'Ch {ch_idx}'
+            )
+            self.plot_widget.addItem(curve)
+            self.plot_curves[ch_idx] = curve
+
+        # Update current channel order
+        self.current_channel_order = self.selected_channels.copy()
+        print(f"Created {len(self.plot_curves)} persistent curves")
+
     def update_overview_range_indicator(self):
         """Update the view range indicator rectangle in overview."""
         if self.overview_widget is None or self.loader is None:
@@ -1443,14 +1915,15 @@ class AdvancedEEGGUI(QMainWindow):
         pass
     
     def update_time_series_view(self):
-        """Update the time series plot."""
+        """Update the time series plot using persistent curves for performance."""
         if self.current_data is None:
             return
-        
+
         if self.current_data.size == 0 or len(self.selected_channels) == 0:
             return
-        
-        self.plot_widget.clear()
+
+        # Initialize persistent curves if needed (only when channels change)
+        self.initialize_plot_curves()
         
         # Adaptive downsampling based on visible range and zoom level
         # Get current visible range from ViewBox (in samples)
@@ -1541,93 +2014,88 @@ class AdvancedEEGGUI(QMainWindow):
         # Convert sample indices to time in seconds for X-axis
         time_axis = time_samples / self.sampling_rate
         
-        # Calculate offset for stacking channels - use a fixed offset based on data statistics
-        # Channel spacing should adapt to data scale and user Y-scale setting
-        if plot_data.size > 0:
-            # Calculate base spacing from data statistics
-            data_std = np.std(plot_data)
-            data_range = np.max(plot_data) - np.min(plot_data)
+        # Calculate channel spacing based on ACTUAL scaled peak-to-peak ranges
+        # FIX: This prevents overlap when channels have very different amplitudes
+        if plot_data.size > 0 and len(self.selected_channels) > 0:
+            # Calculate per-channel peak-to-peak AFTER scaling
+            max_pp_range = 0.0
+            for i in range(min(len(self.selected_channels), plot_data.shape[1])):
+                channel_data = plot_data[:, i]
+                channel_mean = channel_data.mean()
+                channel_data_centered = channel_data - channel_mean
 
-            # Base channel spacing depends on whether data is normalized or raw
-            if data_range < 10:
-                # Normalized/small data: use std-based spacing
-                base_spacing = max(data_std * 6.0, 5.0)
-            else:
-                # Raw data: use range-based spacing
-                base_spacing = max(data_std * 4.0, data_range * 1.5)
+                # Apply Y-scale to get actual plotted amplitude
+                ch_idx = self.selected_channels[i]
+                y_scale = self.channel_y_scales.get(ch_idx, self.base_y_scale)
+                scaled_data = channel_data_centered * y_scale
 
-            # Apply Y-scale factor to channel spacing
-            # This ensures that when user scales Y-axis, channels remain properly separated
-            self.channel_spacing = base_spacing / self.base_y_scale
+                # Get peak-to-peak range after scaling
+                pp_range = scaled_data.max() - scaled_data.min()
+                max_pp_range = max(max_pp_range, pp_range)
+
+            # Add 20% padding to prevent tight overlap
+            self.channel_spacing = max_pp_range * 1.2
+
+            # Ensure minimum spacing
+            min_spacing = 10.0
+            self.channel_spacing = max(self.channel_spacing, min_spacing)
 
             print(f"Channel spacing: {self.channel_spacing:.2f} "
-                  f"(base: {base_spacing:.2f}, Y-scale: {self.base_y_scale:.2f}, "
-                  f"data std: {data_std:.2f}, range: {data_range:.2f})")
+                  f"(max pk-pk: {max_pp_range:.2f}, with 20% padding, "
+                  f"Y-scale: {self.base_y_scale:.2f})")
         else:
-            self.channel_spacing = 1000.0 / self.base_y_scale
+            self.channel_spacing = 100.0
         
-        # Plot each channel
-        # Generate colors - use color names for maximum visibility on black background
-        color_palette = ['w', 'r', 'g', 'b', 'c', 'm', 'y', '#FFA500', '#FF00FF', '#00FFFF']  # white, red, green, blue, cyan, magenta, yellow, orange, fuchsia, aqua
-        
+        # Update each channel using persistent curves - MAJOR PERFORMANCE IMPROVEMENT!
+        # No clearing, no recreating - just update data!
         try:
-            plots_added = 0
+            plots_updated = 0
             for i, ch_idx in enumerate(self.selected_channels):
                 if i >= plot_data.shape[1]:
                     continue
-                    
+
                 channel_data = plot_data[:, i]
-                
+
                 # Ensure we have valid data
                 if channel_data.size == 0:
                     continue
-                
+
                 # For stacking: center each channel around zero, then add offset
                 # This ensures channels are stacked vertically without overlap
                 channel_mean = channel_data.mean()
                 channel_data_centered = channel_data - channel_mean
-                
+
                 # Apply Y-scale factor for this channel (individual per channel)
                 y_scale = self.channel_y_scales.get(ch_idx, self.base_y_scale)
                 scaled_data = channel_data_centered * y_scale
-                
+
                 # Apply offset for stacking (multiply by channel index)
                 y_data = scaled_data + (i * self.channel_spacing)
-                
+
                 # Debug: print actual y-values being plotted
                 if i == 0:  # Only print for first channel to avoid spam
                     print(f"Channel {ch_idx} y-data sample: min={y_data.min():.2f}, max={y_data.max():.2f}, mean={y_data.mean():.2f}")
                     print(f"  Channel data (before offset): min={channel_data_centered.min():.2f}, max={channel_data_centered.max():.2f}")
-                
-                # Cycle through color palette - use bright colors for visibility
-                color = color_palette[i % len(color_palette)]
-                # Use color names directly - PyQtGraph understands these better
-                # Increase width significantly for visibility
-                pen = pg.mkPen(color=color, width=3)  # Bright colors, thicker lines for visibility
-                
-                # Plot the data - time_axis is already in seconds
-                # Convert to numpy arrays if needed
+
+                # Convert to numpy arrays
                 time_array = np.asarray(time_axis, dtype=np.float64)
                 y_array = np.asarray(y_data, dtype=np.float64)
-                
+
                 # Ensure arrays are 1D and contiguous
                 time_array = np.ravel(time_array)
                 y_array = np.ravel(y_array)
-                
-                # Plot the data - use PlotDataItem for better control
-                plot_item = pg.PlotDataItem(
-                    time_array, y_array,
-                    pen=pen,
-                    name=f'Ch {ch_idx}'
-                )
-                self.plot_widget.addItem(plot_item)
-                plots_added += 1
-                print(f"Plotted channel {ch_idx}: {len(y_array)} points, y-range: [{y_array.min():.2f}, {y_array.max():.2f}], first 5 y-values: {y_array[:5]}")
-            
-            print(f"Successfully added {plots_added} plots to display")
-        
+
+                # UPDATE existing curve - NO recreation! This is 10-50x faster!
+                if ch_idx in self.plot_curves:
+                    self.plot_curves[ch_idx].setData(time_array, y_array)
+                    plots_updated += 1
+                    if i == 0:  # Only print for first channel
+                        print(f"Updated channel {ch_idx}: {len(y_array)} points using setData() - FAST!")
+
+            print(f"Successfully updated {plots_updated} curves (no recreation!)")
+
         except Exception as e:
-            print(f"Error plotting channels: {e}")
+            print(f"Error updating curves: {e}")
             import traceback
             traceback.print_exc()
         
@@ -1637,7 +2105,7 @@ class AdvancedEEGGUI(QMainWindow):
         self.plot_widget.setLabel('bottom', f'Time (s) (Loaded: {loaded_start_sec:.2f} - {loaded_end_sec:.2f} s)')
         
         # Explicitly set view range to ensure data is visible
-        if plots_added > 0:
+        if plots_updated > 0:
             # DISABLE auto-range first - this is critical!
             self.plot_widget.disableAutoRange()
             
