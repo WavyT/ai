@@ -475,140 +475,142 @@ class NeuronApp(QMainWindow):
 
 
     def create_display_panel(self):
-        """Create data display panel"""
+        """Create data display panel with NEURON-style navigation"""
         panel = QWidget()
         main_layout = QVBoxLayout(panel)
         main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(5)
+        main_layout.setSpacing(3)
 
-        # Matplotlib figure for plotting
+        # Timeline overview bar (shows full data extent)
+        timeline_frame = QWidget()
+        timeline_frame.setFixedHeight(40)
+        timeline_frame.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc;")
+        timeline_layout = QVBoxLayout(timeline_frame)
+        timeline_layout.setContentsMargins(5, 5, 5, 5)
+
+        self.timeline_label = QLabel("Timeline: 0.00s - 0.00s (Total: 0.00s)")
+        self.timeline_label.setStyleSheet("border: none; background: transparent;")
+        timeline_layout.addWidget(self.timeline_label)
+
+        # Timeline position indicator (shows current view window)
+        self.timeline_slider = QSlider(Qt.Horizontal)
+        self.timeline_slider.setMinimum(0)
+        self.timeline_slider.setMaximum(1000)
+        self.timeline_slider.setValue(0)
+        self.timeline_slider.setFixedHeight(20)
+        self.timeline_slider.valueChanged.connect(self.on_timeline_slider_changed)
+        self.timeline_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B1B1B1, stop:1 #c4c4c4);
+                border: 1px solid #5c5c5c;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #3498db;
+                border: 1px solid #2980b9;
+                width: 20px;
+                height: 20px;
+                margin: -6px 0;
+                border-radius: 10px;
+            }
+        """)
+        timeline_layout.addWidget(self.timeline_slider)
+
+        main_layout.addWidget(timeline_frame)
+
+        # Main plot canvas
         self.figure = Figure(figsize=(12, 6))
         self.canvas = FigureCanvas(self.figure)
-        self.canvas.setMinimumHeight(400)  # Ensure minimum canvas height
+        self.canvas.setMinimumHeight(400)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # Add canvas with stretch factor to take most space
-        main_layout.addWidget(self.canvas, stretch=3)
+        # Enable mousewheel events for zoom
+        self.canvas.mpl_connect('scroll_event', self.on_mousewheel_zoom)
 
-        # Create controls container with fixed/minimum height
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(5)
+        main_layout.addWidget(self.canvas, stretch=10)
 
-        # Navigation controls
-        nav_group = QGroupBox("Navigation")
-        nav_group.setMaximumHeight(120)  # Limit navigation group height
-        nav_layout = QVBoxLayout()
-        nav_layout.setSpacing(5)
+        # Compact navigation controls
+        nav_container = QWidget()
+        nav_container.setMaximumHeight(100)
+        nav_layout = QVBoxLayout(nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(3)
 
-        # Time window controls
-        time_layout = QHBoxLayout()
-        time_layout.addWidget(QLabel("Start:"))
-        self.spin_time_start = QDoubleSpinBox()
-        self.spin_time_start.setDecimals(3)
-        self.spin_time_start.setSuffix(" s")
-        self.spin_time_start.valueChanged.connect(self.on_time_start_changed)
-        time_layout.addWidget(self.spin_time_start)
+        # Compact navigation row
+        nav_row1 = QHBoxLayout()
 
-        time_layout.addWidget(QLabel("Duration:"))
+        # Time window display (read-only, more compact)
+        nav_row1.addWidget(QLabel("Window:"))
         self.spin_time_duration = QDoubleSpinBox()
-        self.spin_time_duration.setDecimals(3)
+        self.spin_time_duration.setDecimals(2)
         self.spin_time_duration.setSuffix(" s")
         self.spin_time_duration.setValue(1.0)
         self.spin_time_duration.setMinimum(0.01)
         self.spin_time_duration.setMaximum(1000)
+        self.spin_time_duration.setMaximumWidth(100)
         self.spin_time_duration.valueChanged.connect(self.on_time_duration_changed)
-        time_layout.addWidget(self.spin_time_duration)
+        nav_row1.addWidget(self.spin_time_duration)
 
-        time_layout.addWidget(QLabel("End:"))
-        self.spin_time_end = QDoubleSpinBox()
-        self.spin_time_end.setDecimals(3)
-        self.spin_time_end.setSuffix(" s")
-        self.spin_time_end.setValue(1.0)
-        self.spin_time_end.valueChanged.connect(self.on_time_end_changed)
-        time_layout.addWidget(self.spin_time_end)
+        nav_row1.addSpacing(20)
 
-        nav_layout.addLayout(time_layout)
-
-        # Navigation buttons
-        nav_btn_layout = QHBoxLayout()
-
+        # Navigation buttons (compact)
         self.btn_jump_start = QPushButton("|◀")
-        self.btn_jump_start.setToolTip("Jump to start")
+        self.btn_jump_start.setToolTip("Jump to start (Home)")
+        self.btn_jump_start.setMaximumWidth(40)
         self.btn_jump_start.clicked.connect(self.jump_to_start)
-        nav_btn_layout.addWidget(self.btn_jump_start)
+        nav_row1.addWidget(self.btn_jump_start)
 
         self.btn_backward_full = QPushButton("◀◀")
-        self.btn_backward_full.setToolTip("Backward full duration")
+        self.btn_backward_full.setToolTip("Backward full (PgUp)")
+        self.btn_backward_full.setMaximumWidth(40)
         self.btn_backward_full.clicked.connect(self.backward_full)
-        nav_btn_layout.addWidget(self.btn_backward_full)
+        nav_row1.addWidget(self.btn_backward_full)
 
         self.btn_backward_half = QPushButton("◀")
-        self.btn_backward_half.setToolTip("Backward half duration")
+        self.btn_backward_half.setToolTip("Backward half (Left)")
+        self.btn_backward_half.setMaximumWidth(40)
         self.btn_backward_half.clicked.connect(self.backward_half)
-        nav_btn_layout.addWidget(self.btn_backward_half)
+        nav_row1.addWidget(self.btn_backward_half)
 
         self.btn_forward_half = QPushButton("▶")
-        self.btn_forward_half.setToolTip("Forward half duration")
+        self.btn_forward_half.setToolTip("Forward half (Right)")
+        self.btn_forward_half.setMaximumWidth(40)
         self.btn_forward_half.clicked.connect(self.forward_half)
-        nav_btn_layout.addWidget(self.btn_forward_half)
+        nav_row1.addWidget(self.btn_forward_half)
 
         self.btn_forward_full = QPushButton("▶▶")
-        self.btn_forward_full.setToolTip("Forward full duration")
+        self.btn_forward_full.setToolTip("Forward full (PgDn)")
+        self.btn_forward_full.setMaximumWidth(40)
         self.btn_forward_full.clicked.connect(self.forward_full)
-        nav_btn_layout.addWidget(self.btn_forward_full)
+        nav_row1.addWidget(self.btn_forward_full)
 
         self.btn_jump_end = QPushButton("▶|")
-        self.btn_jump_end.setToolTip("Jump to end")
+        self.btn_jump_end.setToolTip("Jump to end (End)")
+        self.btn_jump_end.setMaximumWidth(40)
         self.btn_jump_end.clicked.connect(self.jump_to_end)
-        nav_btn_layout.addWidget(self.btn_jump_end)
+        nav_row1.addWidget(self.btn_jump_end)
 
-        nav_layout.addLayout(nav_btn_layout)
+        nav_row1.addSpacing(20)
 
-        # Time slider for scrolling - in its own row for better visibility
-        slider_layout = QHBoxLayout()
-        slider_layout.addWidget(QLabel("Position:"))
-        self.time_slider = QSlider(Qt.Horizontal)
-        self.time_slider.setMinimum(0)
-        self.time_slider.setMaximum(1000)
-        self.time_slider.setFixedHeight(25)  # Fixed height to prevent stretching
-        self.time_slider.valueChanged.connect(self.on_time_slider_changed)
-        slider_layout.addWidget(self.time_slider)
-        nav_layout.addLayout(slider_layout)
-
-        # Zoom controls in a compact row
-        zoom_layout = QHBoxLayout()
-        zoom_layout.addWidget(QLabel("Zoom:"))
-
+        # Zoom buttons
+        nav_row1.addWidget(QLabel("Zoom:"))
         self.btn_zoom_in = QPushButton("In [+]")
-        self.btn_zoom_in.setMaximumWidth(80)
+        self.btn_zoom_in.setMaximumWidth(60)
+        self.btn_zoom_in.setToolTip("Zoom in (Mouse wheel up)")
         self.btn_zoom_in.clicked.connect(self.zoom_in_time)
-        zoom_layout.addWidget(self.btn_zoom_in)
+        nav_row1.addWidget(self.btn_zoom_in)
 
         self.btn_zoom_out = QPushButton("Out [-]")
-        self.btn_zoom_out.setMaximumWidth(80)
+        self.btn_zoom_out.setMaximumWidth(60)
+        self.btn_zoom_out.setToolTip("Zoom out (Mouse wheel down)")
         self.btn_zoom_out.clicked.connect(self.zoom_out_time)
-        zoom_layout.addWidget(self.btn_zoom_out)
+        nav_row1.addWidget(self.btn_zoom_out)
 
-        zoom_layout.addStretch()
-        nav_layout.addLayout(zoom_layout)
+        nav_row1.addStretch()
+        nav_layout.addLayout(nav_row1)
 
-        # Time slider for scrolling
-        slider_layout = QHBoxLayout()
-        slider_layout.addWidget(QLabel("Position:"))
-        self.time_slider = QSlider(Qt.Horizontal)
-        self.time_slider.setMinimum(0)
-        self.time_slider.setMaximum(1000)
-        self.time_slider.setFixedHeight(25)  # Fixed slider height to prevent stretching
-        self.time_slider.valueChanged.connect(self.on_time_slider_changed)
-        slider_layout.addWidget(self.time_slider)
-        nav_layout.addLayout(slider_layout)
-
-        nav_group.setLayout(nav_layout)
-        nav_group.setLayout(nav_layout)
-        nav_group.setMaximumHeight(180)  # Limit navigation group height
-        controls_layout.addWidget(nav_group)
+        main_layout.addWidget(nav_container)
 
         # Display controls - more compact
         display_group = QGroupBox("Display Settings")
@@ -653,10 +655,7 @@ class NeuronApp(QMainWindow):
 
         display_layout.addStretch()
         display_group.setLayout(display_layout)
-        controls_layout.addWidget(display_group)
-
-        # Add controls container with no stretch - it stays at natural size
-        main_layout.addWidget(controls_widget, stretch=0)
+        main_layout.addWidget(display_group)
 
         self.tab_widget.addTab(panel, "Display")
 
@@ -766,6 +765,29 @@ class NeuronApp(QMainWindow):
 
         self.tab_widget.addTab(panel, "Config")
 
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts for navigation"""
+        from PyQt5.QtCore import Qt
+        key = event.key()
+
+        if key == Qt.Key_Left:
+            self.backward_half()
+        elif key == Qt.Key_Right:
+            self.forward_half()
+        elif key == Qt.Key_PageUp:
+            self.backward_full()
+        elif key == Qt.Key_PageDown:
+            self.forward_full()
+        elif key == Qt.Key_Home:
+            self.jump_to_start()
+        elif key == Qt.Key_End:
+            self.jump_to_end()
+        elif key == Qt.Key_Plus or key == Qt.Key_Equal:
+            self.zoom_in_time()
+        elif key == Qt.Key_Minus or key == Qt.Key_Underscore:
+            self.zoom_out_time()
+        else:
+            super().keyPressEvent(event)
 
     def reset_all(self, ask=True):
         """Reset entire application state"""
@@ -868,7 +890,7 @@ class NeuronApp(QMainWindow):
     # ========================================================================
 
     def update_time_window(self, start=None, end=None, duration=None):
-        """Update time window parameters"""
+        """Update time window parameters and timeline display"""
         total_samples = len(self.meting.adc) if len(self.meting.adc) > 0 else 1000
 
         if start is not None:
@@ -886,37 +908,23 @@ class NeuronApp(QMainWindow):
         elif duration is not None and end is not None:
             self.time_start = max(0, self.time_end - self.time_duration)
 
-        # Update GUI controls (block signals to avoid recursion)
-        self.spin_time_start.blockSignals(True)
-        self.spin_time_end.blockSignals(True)
+        # Update duration spinbox (block signals to avoid recursion)
         self.spin_time_duration.blockSignals(True)
-
-        self.spin_time_start.setValue(self.time_start / self.sampling_rate)
-        self.spin_time_end.setValue(self.time_end / self.sampling_rate)
         self.spin_time_duration.setValue(self.time_duration / self.sampling_rate)
-
-        self.spin_time_start.blockSignals(False)
-        self.spin_time_end.blockSignals(False)
         self.spin_time_duration.blockSignals(False)
 
-        # Update slider
+        # Update timeline label
+        start_time = self.time_start / self.sampling_rate
+        end_time = self.time_end / self.sampling_rate
+        total_time = total_samples / self.sampling_rate
+        self.timeline_label.setText(f"Timeline: {start_time:.2f}s - {end_time:.2f}s (Total: {total_time:.2f}s)")
+
+        # Update timeline slider
         if total_samples > self.time_duration:
             slider_pos = int(1000 * self.time_start / (total_samples - self.time_duration))
-            self.time_slider.blockSignals(True)
-            self.time_slider.setValue(slider_pos)
-            self.time_slider.blockSignals(False)
-
-    def on_time_start_changed(self, value):
-        """Handle start time change"""
-        start_samples = value * self.sampling_rate
-        self.update_time_window(start=start_samples)
-        self.redraw()
-
-    def on_time_end_changed(self, value):
-        """Handle end time change"""
-        end_samples = value * self.sampling_rate
-        self.update_time_window(end=end_samples)
-        self.redraw()
+            self.timeline_slider.blockSignals(True)
+            self.timeline_slider.setValue(slider_pos)
+            self.timeline_slider.blockSignals(False)
 
     def on_time_duration_changed(self, value):
         """Handle duration change"""
@@ -924,12 +932,34 @@ class NeuronApp(QMainWindow):
         self.update_time_window(duration=duration_samples)
         self.redraw()
 
-    def on_time_slider_changed(self, value):
-        """Handle time slider change"""
+    def on_timeline_slider_changed(self, value):
+        """Handle timeline slider change - memory efficient scrolling"""
         total_samples = len(self.meting.adc) if len(self.meting.adc) > 0 else 1000
         if total_samples > self.time_duration:
+            # Calculate start position from slider value (0-1000 range)
             start = (value / 1000.0) * (total_samples - self.time_duration)
             self.update_time_window(start=start)
+            self.redraw()
+
+    def on_mousewheel_zoom(self, event):
+        """Handle mousewheel zoom - zoom in/out at cursor position"""
+        if event.inaxes:
+            # Get cursor position in data coordinates
+            xdata = event.xdata
+
+            # Zoom factor
+            zoom_factor = 0.8 if event.button == 'up' else 1.25
+
+            # Calculate new duration
+            new_duration = self.time_duration * zoom_factor
+            new_duration = max(10, min(new_duration, len(self.meting.adc)))
+
+            # Zoom centered on cursor position
+            cursor_samples = xdata * self.sampling_rate
+            relative_pos = (cursor_samples - self.time_start) / self.time_duration
+            new_start = cursor_samples - new_duration * relative_pos
+
+            self.update_time_window(start=new_start, duration=new_duration)
             self.redraw()
 
     def jump_to_start(self):
