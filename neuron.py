@@ -481,20 +481,11 @@ class NeuronApp(QMainWindow):
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(5)
 
-        # Matplotlib figure for plotting - with size policy to prevent expansion
+        # Matplotlib figure for plotting
         self.figure = Figure(figsize=(12, 6))
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setMinimumHeight(400)  # Ensure minimum canvas height
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(self.canvas, stretch=3)  # Give canvas most of the space
-
-        # Container for all controls (prevents overlaying)
-        controls_container = QWidget()
-        controls_layout = QVBoxLayout(controls_container)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        # Set size policy to expand horizontally but have minimum vertical size
-        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.canvas.setMinimumHeight(400)
 
         # Add canvas with stretch factor to take most space
         main_layout.addWidget(self.canvas, stretch=3)
