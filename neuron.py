@@ -519,14 +519,17 @@ class NeuronApp(QMainWindow):
 
         main_layout.addWidget(timeline_frame)
 
-        # Main plot canvas
-        self.figure = Figure(figsize=(12, 6))
+        # Main plot canvas with overview and detail axes
+        self.figure = Figure(figsize=(12, 7))
         self.canvas = FigureCanvas(self.figure)
-        self.canvas.setMinimumHeight(400)
+        self.canvas.setMinimumHeight(450)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Enable mousewheel events for zoom
         self.canvas.mpl_connect('scroll_event', self.on_mousewheel_zoom)
+
+        # Enable click events on overview for navigation
+        self.canvas.mpl_connect('button_press_event', self.on_canvas_click)
 
         main_layout.addWidget(self.canvas, stretch=10)
 
@@ -647,8 +650,8 @@ class NeuronApp(QMainWindow):
         display_layout.addWidget(QLabel("Max Channels:"))
         self.spin_max_channels = QSpinBox()
         self.spin_max_channels.setMinimum(1)
-        self.spin_max_channels.setMaximum(128)
-        self.spin_max_channels.setValue(16)
+        self.spin_max_channels.setMaximum(256)
+        self.spin_max_channels.setValue(72)
         self.spin_max_channels.setToolTip("Maximum number of channels to display in multi-channel mode")
         self.spin_max_channels.valueChanged.connect(self.redraw)
         display_layout.addWidget(self.spin_max_channels)
@@ -943,7 +946,7 @@ class NeuronApp(QMainWindow):
 
     def on_mousewheel_zoom(self, event):
         """Handle mousewheel zoom - zoom in/out at cursor position"""
-        if event.inaxes:
+        if event.inaxes and event.inaxes.get_label() == 'detail':
             # Get cursor position in data coordinates
             xdata = event.xdata
 
@@ -961,6 +964,19 @@ class NeuronApp(QMainWindow):
 
             self.update_time_window(start=new_start, duration=new_duration)
             self.redraw()
+
+    def on_canvas_click(self, event):
+        """Handle click on canvas - navigate via overview"""
+        if event.inaxes and event.inaxes.get_label() == 'overview':
+            # Click on overview - jump to that position
+            if len(self.meting.adc) > 0:
+                click_time = event.xdata  # In seconds
+                click_sample = click_time * self.sampling_rate
+
+                # Center window on clicked position
+                new_start = click_sample - self.time_duration / 2
+                self.update_time_window(start=new_start)
+                self.redraw()
 
     def jump_to_start(self):
         """Jump to start of recording"""
@@ -1193,12 +1209,10 @@ class NeuronApp(QMainWindow):
         # Initialize time window
         self.sampling_rate = sampling_rate
         self.time_start = 0
-        self.time_duration = min(1000, max_samples)  # 1 second or less
+        self.time_duration = min(int(sampling_rate), max_samples)  # 1 second or less
         self.time_end = self.time_duration
 
         # Update time controls
-        self.spin_time_start.setMaximum(max_samples / sampling_rate)
-        self.spin_time_end.setMaximum(max_samples / sampling_rate)
         self.spin_time_duration.setMaximum(max_samples / sampling_rate)
         self.update_time_window(start=0, duration=self.time_duration)
 
@@ -1297,8 +1311,6 @@ class NeuronApp(QMainWindow):
         self.time_end = self.time_duration
 
         # Update time controls
-        self.spin_time_start.setMaximum(num_samples / self.sampling_rate)
-        self.spin_time_end.setMaximum(num_samples / self.sampling_rate)
         self.spin_time_duration.setMaximum(num_samples / self.sampling_rate)
         self.update_time_window(start=0, duration=self.time_duration)
 
@@ -1686,104 +1698,123 @@ class NeuronApp(QMainWindow):
     # ========================================================================
 
     def redraw(self):
-        """Redraw data display - multichannel EEG stacked view with time navigation"""
+        """Redraw data display - multichannel EEG with overview and detail view"""
         if len(self.meting.adc) == 0:
             return
 
         self.figure.clear()
 
         full_data = self.meting.adc
-
-        # Extract time window
-        start_idx = int(self.time_start)
-        end_idx = int(self.time_end)
-        end_idx = min(end_idx, len(full_data))
-        start_idx = max(0, min(start_idx, end_idx - 1))
-
-        data = full_data[start_idx:end_idx, :]
-
-        if data.shape[0] == 0:
-            return
+        num_samples_total = len(full_data)
 
         # Get display parameters
         gain = self.spin_gain.value()
         channel_to_show = self.spin_channel.value()  # 0 = all channels
         separation_factor = self.spin_separation.value()
 
-        # Create time axis in seconds
-        time_axis = (np.arange(data.shape[0]) + start_idx) / self.sampling_rate
-
-        if data.ndim == 1 or data.shape[1] == 1:
-            # Single channel
-            ax = self.figure.add_subplot(111)
-            channel_data = data.flatten() * gain
-            ax.plot(time_axis, channel_data, 'k-', linewidth=0.6)
-            ax.set_xlabel('Time (s)')
-            ax.set_ylabel('Amplitude')
-            ax.set_title('Data Trace')
-            ax.grid(True, alpha=0.3)
+        # Determine channels to display
+        if full_data.ndim == 1 or full_data.shape[1] == 1:
+            single_channel_mode = True
+            channels_to_plot = [0]
         else:
-            # Multi-channel EEG display - stacked view
-            num_samples, num_channels = data.shape
-
-            # Determine which channels to display
+            num_channels = full_data.shape[1]
             if channel_to_show > 0 and channel_to_show <= num_channels:
-                # Single channel mode
-                channels_to_plot = [channel_to_show - 1]
                 single_channel_mode = True
+                channels_to_plot = [channel_to_show - 1]
             else:
-                # Multi-channel mode - use user-specified max channels
+                single_channel_mode = False
                 max_channels_to_display = min(num_channels, self.spin_max_channels.value())
                 channels_to_plot = list(range(max_channels_to_display))
-                single_channel_mode = False
 
-            ax = self.figure.add_subplot(111)
+        # Create subplot grid: overview on top (15%), detail below (85%)
+        gs = self.figure.add_gridspec(2, 1, height_ratios=[1, 5], hspace=0.25)
+        ax_overview = self.figure.add_subplot(gs[0])
+        ax_detail = self.figure.add_subplot(gs[1])
 
-            if single_channel_mode:
-                # Single channel view with proper scaling
-                channel_data = data[:, channels_to_plot[0]] * gain
-                ax.plot(time_axis, channel_data, 'k-', linewidth=0.8)
-                ax.set_xlabel('Time (s)')
-                ax.set_ylabel(f'Amplitude (Ch {channels_to_plot[0]+1})')
-                ax.set_title(f'Channel {channels_to_plot[0]+1} - Gain: {gain:.2f}x')
-                ax.grid(True, alpha=0.3)
-            else:
-                # Multi-channel stacked view (EEG style)
-                # Calculate channel separation based on data range
-                data_subset = data[:, channels_to_plot]
-                data_range = np.ptp(data_subset)  # peak-to-peak
+        # Label axes for event handling
+        ax_overview.set_label('overview')
+        ax_detail.set_label('detail')
 
-                if data_range == 0:
-                    data_range = 1.0
+        # ===== OVERVIEW PLOT (downsampled full recording) =====
+        # Downsample for performance (max 2000 points)
+        downsample_factor = max(1, num_samples_total // 2000)
+        if full_data.ndim == 1 or full_data.shape[1] == 1:
+            overview_data = full_data[::downsample_factor].flatten()
+        else:
+            # Show mean of selected channels for overview
+            overview_data = np.mean(full_data[::downsample_factor, :min(10, full_data.shape[1])], axis=1)
 
-                channel_separation = data_range * separation_factor * gain
+        overview_time = np.arange(len(overview_data)) * downsample_factor / self.sampling_rate
 
-                colors = plt.cm.tab20(np.linspace(0, 1, len(channels_to_plot)))
+        ax_overview.plot(overview_time, overview_data, 'k-', linewidth=0.5, alpha=0.6)
+        ax_overview.set_ylabel('Overview', fontsize=9)
+        ax_overview.set_xlim(0, num_samples_total / self.sampling_rate)
+        ax_overview.tick_params(labelsize=8)
+        ax_overview.grid(True, alpha=0.2)
 
-                for i, ch_idx in enumerate(channels_to_plot):
-                    offset = i * channel_separation
-                    channel_data = data[:, ch_idx] * gain + offset
+        # Highlight current viewing window
+        start_time = self.time_start / self.sampling_rate
+        end_time = self.time_end / self.sampling_rate
+        ax_overview.axvspan(start_time, end_time, alpha=0.3, color='blue', label='Current View')
+        ax_overview.set_title('Full Recording (click to navigate)', fontsize=9, pad=3)
 
-                    ax.plot(time_axis, channel_data, '-',
-                           linewidth=0.5, color=colors[i],
-                           label=f'Ch{ch_idx+1}', alpha=0.8)
+        # ===== DETAIL PLOT (current window) =====
+        start_idx = int(self.time_start)
+        end_idx = int(self.time_end)
+        end_idx = min(end_idx, num_samples_total)
+        start_idx = max(0, min(start_idx, end_idx - 1))
 
-                    # Add channel label on the left
-                    y_pos = offset
-                    ax.text(time_axis[0] - (time_axis[-1] - time_axis[0]) * 0.015, y_pos,
-                           f'Ch{ch_idx+1}',
-                           verticalalignment='center', fontsize=9,
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        data = full_data[start_idx:end_idx]
+        if full_data.ndim > 1:
+            data = data[:, channels_to_plot] if len(data) > 0 else np.array([])
 
-                ax.set_xlabel('Time (s)')
-                ax.set_ylabel('Channels (stacked)')
-                ax.set_title(f'Multichannel EEG - {len(channels_to_plot)} channels, '
-                           f'Gain: {gain:.2f}x, Sep: {separation_factor:.2f}x')
-                ax.set_xlim(time_axis[0], time_axis[-1])
-                ax.grid(True, alpha=0.2, axis='x')
+        if len(data) == 0:
+            return
 
-                # Remove y-axis ticks for stacked view
-                ax.set_yticks([])
+        time_axis = (np.arange(len(data)) + start_idx) / self.sampling_rate
+
+        if single_channel_mode:
+            # Single channel view
+            channel_data = data if data.ndim == 1 else data[:, 0]
+            channel_data = channel_data * gain
+            ax_detail.plot(time_axis, channel_data, 'k-', linewidth=0.7)
+            ax_detail.set_xlabel('Time (s)')
+            ax_detail.set_ylabel(f'Amplitude (Ch {channels_to_plot[0]+1})')
+            ax_detail.set_title(f'Channel {channels_to_plot[0]+1} - Gain: {gain:.2f}x')
+            ax_detail.grid(True, alpha=0.3)
+        else:
+            # Multi-channel stacked view (EEG style)
+            data_range = np.ptp(data)
+            if data_range == 0:
+                data_range = 1.0
+
+            channel_separation = data_range * separation_factor * gain
+            colors = plt.cm.tab20(np.linspace(0, 1, len(channels_to_plot)))
+
+            for i, ch_idx in enumerate(channels_to_plot):
+                offset = i * channel_separation
+                if data.ndim == 1:
+                    channel_data = data * gain + offset
+                else:
+                    channel_data = data[:, i] * gain + offset
+
+                ax_detail.plot(time_axis, channel_data, '-',
+                              linewidth=0.5, color=colors[i], alpha=0.8)
+
+                # Add channel label
+                y_pos = offset
+                label_x = time_axis[0] - (time_axis[-1] - time_axis[0]) * 0.012
+                ax_detail.text(label_x, y_pos, f'Ch{ch_idx+1}',
+                              verticalalignment='center', fontsize=8,
+                              bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='gray', linewidth=0.5))
+
+            ax_detail.set_xlabel('Time (s)')
+            ax_detail.set_ylabel('Channels')
+            ax_detail.set_title(f'Detail View: {len(channels_to_plot)}/{full_data.shape[1]} channels '
+                               f'(Gain: {gain:.2f}x, Sep: {separation_factor:.2f}x)', pad=5)
+            ax_detail.set_xlim(time_axis[0], time_axis[-1])
+            ax_detail.grid(True, alpha=0.2, axis='x')
+            ax_detail.set_yticks([])
 
         self.figure.tight_layout()
         self.canvas.draw()
