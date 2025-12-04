@@ -38,6 +38,13 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QColor, QPalette
 
+# Import EEGLoader from the same directory
+try:
+    from eeg_loader import EEGLoader
+except ImportError:
+    print("Warning: eeg_loader.py not found. .dat file loading will not work.")
+    EEGLoader = None
+
 
 # ============================================================================
 # CONSTANTS AND ENUMERATIONS
@@ -795,14 +802,16 @@ class NeuronApp(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(
             self, "Load Data",
             self.file_settings.root,
-            "MAT files (*.mat);;HDF5 files (*.h5);;All files (*.*)"
+            "EEG files (*.dat *.mat);;MAT files (*.mat);;DAT files (*.dat);;HDF5 files (*.h5);;All files (*.*)"
         )
 
         if not filename:
             return
 
         try:
-            if filename.endswith('.mat'):
+            if filename.endswith('.dat'):
+                self.load_dat_file(filename)
+            elif filename.endswith('.mat'):
                 self.load_mat_file(filename)
             elif filename.endswith('.h5'):
                 self.load_h5_file(filename)
@@ -810,24 +819,161 @@ class NeuronApp(QMainWindow):
                 self.message("Unsupported file format")
                 return
 
-            self.statusBar().showMessage(f'Loaded: {filename}')
+            self.statusBar().showMessage(f'Loaded: {Path(filename).name}')
             self.redraw()
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load file:\n{str(e)}")
 
 
+    def load_dat_file(self, filename: str):
+        """Load .dat file containing multichannel EEG data"""
+        if EEGLoader is None:
+            raise ImportError("eeg_loader.py not found. Cannot load .dat files.")
+
+        # Try to infer channel count, or use common values
+        num_channels = None
+
+        # Check if there's a companion file with channel info
+        metadata_file = Path(filename).parent / "channel_info.txt"
+        if metadata_file.exists():
+            try:
+                with open(metadata_file, 'r') as f:
+                    for line in f:
+                        if 'channels' in line.lower():
+                            num_channels = int(line.split(':')[1].strip())
+                            break
+            except:
+                pass
+
+        # Initialize loader
+        try:
+            loader = EEGLoader(filename, num_channels=num_channels)
+        except Exception as e:
+            # Try common channel counts
+            for nch in [16, 32, 64, 72, 128]:
+                try:
+                    loader = EEGLoader(filename, num_channels=nch)
+                    break
+                except:
+                    continue
+            else:
+                raise ValueError(f"Could not determine channel count for {filename}")
+
+        # Load all data (for now - could add chunking for very large files)
+        # Load first 10 seconds or 100k samples, whichever is smaller
+        max_samples = min(100000, loader.num_samples_per_channel)
+
+        self.meting.adc = loader.load_all_channels(start_sample=0, end_sample=max_samples, dtype=np.float32)
+
+        # Store sampling rate if available
+        if loader.timestamps is not None and len(loader.timestamps) > 1:
+            sampling_rate = 1.0 / np.mean(np.diff(loader.timestamps))
+        else:
+            sampling_rate = 1000.0  # Default 1kHz
+
+        # Create ADC channel metadata
+        self.meting.ADC = []
+        for i in range(loader.num_channels):
+            channel = ADCChannel(
+                device=0,
+                local=i,
+                hwchan=i,
+                gain=1.0,
+                usermax=1000.0,
+                name=f'EEG{i+1}',
+                unit='μV',
+                junction=0.0,
+                color='k'
+            )
+            self.meting.ADC.append(channel)
+
+        self.statusBar().showMessage(
+            f'Loaded {loader.num_channels} channels, {max_samples} samples @ {sampling_rate:.1f} Hz'
+        )
+
     def load_mat_file(self, filename: str):
-        """Load MATLAB .mat file"""
-        import scipy.io as sio
+        """Load MATLAB .mat file containing EEG data or Meting structure"""
+        try:
+            import scipy.io as sio
+        except ImportError:
+            raise ImportError("scipy is required to load .mat files")
 
         mat_data = sio.loadmat(filename)
 
-        # Extract data (adjust based on actual MAT file structure)
-        if 'adc' in mat_data:
-            self.meting.adc = mat_data['adc']
-        if 'dac' in mat_data:
-            self.meting.dac = mat_data['dac']
+        # Check if this is a Neuron.m Meting structure
+        if 'Meting' in mat_data:
+            # Load Neuron.m format
+            meting_struct = mat_data['Meting']
+
+            # MATLAB structures are stored as structured arrays
+            if meting_struct.dtype.names:
+                # Extract ADC data
+                if 'adc' in meting_struct.dtype.names:
+                    self.meting.adc = meting_struct['adc'][0, 0].astype(np.float32)
+
+                # Extract DAC data
+                if 'dac' in meting_struct.dtype.names:
+                    self.meting.dac = meting_struct['dac'][0, 0]
+
+                # Extract metadata
+                if 'serienaam' in meting_struct.dtype.names:
+                    try:
+                        self.meting.serienaam = str(meting_struct['serienaam'][0, 0][0])
+                    except:
+                        pass
+
+        # Check for raw EEG data (similar format to .dat)
+        elif 'data' in mat_data:
+            self.meting.adc = mat_data['data'].astype(np.float32)
+
+        # Check for direct adc/dac format
+        elif 'adc' in mat_data:
+            self.meting.adc = mat_data['adc'].astype(np.float32)
+            if 'dac' in mat_data:
+                self.meting.dac = mat_data['dac']
+
+        # If no recognized format, try to load any large array
+        else:
+            # Find the largest array that's not metadata
+            largest_key = None
+            largest_size = 0
+            for key in mat_data.keys():
+                if not key.startswith('__'):
+                    arr = mat_data[key]
+                    if isinstance(arr, np.ndarray) and arr.size > largest_size:
+                        largest_key = key
+                        largest_size = arr.size
+
+            if largest_key:
+                self.meting.adc = mat_data[largest_key].astype(np.float32)
+                self.statusBar().showMessage(f'Loaded array "{largest_key}" from .mat file')
+            else:
+                raise ValueError("No suitable data array found in .mat file")
+
+        # Ensure adc is 2D (samples x channels)
+        if len(self.meting.adc.shape) == 1:
+            self.meting.adc = self.meting.adc.reshape(-1, 1)
+        elif len(self.meting.adc.shape) == 3:
+            # If 3D (samples x channels x sweeps), reshape or take first sweep
+            self.meting.adc = self.meting.adc[:, :, 0]
+
+        # Create channel metadata if not present
+        if len(self.meting.ADC) == 0:
+            num_channels = self.meting.adc.shape[1]
+            for i in range(num_channels):
+                channel = ADCChannel(
+                    device=0,
+                    local=i,
+                    hwchan=i,
+                    gain=1.0,
+                    usermax=1000.0,
+                    name=f'Ch{i+1}',
+                    unit='a.u.',
+                    junction=0.0,
+                    color='k'
+                )
+                self.meting.ADC.append(channel)
 
 
     def load_h5_file(self, filename: str):
@@ -1213,7 +1359,7 @@ class NeuronApp(QMainWindow):
     # ========================================================================
 
     def redraw(self):
-        """Redraw data display"""
+        """Redraw data display - multichannel EEG stacked view"""
         if len(self.meting.adc) == 0:
             return
 
@@ -1222,6 +1368,7 @@ class NeuronApp(QMainWindow):
         data = self.meting.adc
 
         if data.ndim == 1:
+            # Single channel
             ax = self.figure.add_subplot(111)
             ax.plot(data, 'k-', linewidth=0.5)
             ax.set_xlabel('Sample')
@@ -1229,15 +1376,66 @@ class NeuronApp(QMainWindow):
             ax.set_title('Data Trace')
             ax.grid(True, alpha=0.3)
         else:
-            # Multi-channel display
-            n_channels = min(data.shape[1], 8)  # Limit to 8 channels
-            for i in range(n_channels):
-                ax = self.figure.add_subplot(n_channels, 1, i+1)
-                ax.plot(data[:, i], 'k-', linewidth=0.5)
-                ax.set_ylabel(f'Ch {i+1}')
+            # Multi-channel EEG display - stacked view
+            num_samples, num_channels = data.shape
+
+            # Get display parameters
+            gain = self.spin_gain.value()
+            channel_to_show = self.spin_channel.value() - 1  # Convert to 0-indexed
+
+            # Determine how many channels to display
+            max_channels_to_display = min(num_channels, 16)  # Limit to 16 for readability
+
+            # If specific channel selected and within range, show only that channel
+            if 0 <= channel_to_show < num_channels:
+                channels_to_plot = [channel_to_show]
+                single_channel_mode = True
+            else:
+                # Show multiple channels
+                channels_to_plot = list(range(max_channels_to_display))
+                single_channel_mode = False
+
+            ax = self.figure.add_subplot(111)
+
+            if single_channel_mode:
+                # Single channel view
+                channel_data = data[:, channels_to_plot[0]] * gain
+                time_axis = np.arange(len(channel_data))
+                ax.plot(time_axis, channel_data, 'k-', linewidth=0.8)
+                ax.set_xlabel('Sample')
+                ax.set_ylabel(f'Amplitude (Ch {channels_to_plot[0]+1})')
+                ax.set_title(f'Channel {channels_to_plot[0]+1}')
                 ax.grid(True, alpha=0.3)
-                if i == n_channels - 1:
-                    ax.set_xlabel('Sample')
+            else:
+                # Multi-channel stacked view (EEG style)
+                time_axis = np.arange(num_samples)
+
+                # Calculate channel separation
+                data_range = np.ptp(data[:, channels_to_plot])  # peak-to-peak
+                channel_separation = data_range * 1.5 / gain
+
+                colors = plt.cm.tab10(np.linspace(0, 1, len(channels_to_plot)))
+
+                for i, ch_idx in enumerate(channels_to_plot):
+                    offset = i * channel_separation
+                    channel_data = data[:, ch_idx] * gain + offset
+
+                    ax.plot(time_axis, channel_data, '-',
+                           linewidth=0.6, color=colors[i],
+                           label=f'Ch{ch_idx+1}')
+
+                    # Add channel label on the left
+                    ax.text(-num_samples*0.02, offset, f'Ch{ch_idx+1}',
+                           verticalalignment='center', fontsize=8)
+
+                ax.set_xlabel('Sample')
+                ax.set_ylabel('Channels (stacked)')
+                ax.set_title(f'Multichannel EEG ({len(channels_to_plot)} channels, gain={gain:.2f}x)')
+                ax.set_xlim(0, num_samples)
+                ax.grid(True, alpha=0.2, axis='x')
+
+                # Remove y-axis ticks for stacked view
+                ax.set_yticks([])
 
         self.figure.tight_layout()
         self.canvas.draw()
