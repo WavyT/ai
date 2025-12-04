@@ -484,6 +484,14 @@ class NeuronApp(QMainWindow):
         # Matplotlib figure for plotting - with size policy to prevent expansion
         self.figure = Figure(figsize=(12, 6))
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.setMinimumHeight(400)  # Ensure minimum canvas height
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.canvas, stretch=3)  # Give canvas most of the space
+
+        # Container for all controls (prevents overlaying)
+        controls_container = QWidget()
+        controls_layout = QVBoxLayout(controls_container)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
         # Set size policy to expand horizontally but have minimum vertical size
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.canvas.setMinimumHeight(400)
@@ -499,6 +507,7 @@ class NeuronApp(QMainWindow):
 
         # Navigation controls
         nav_group = QGroupBox("Navigation")
+        nav_group.setMaximumHeight(120)  # Limit navigation group height
         nav_layout = QVBoxLayout()
         nav_layout.setSpacing(5)
 
@@ -594,12 +603,25 @@ class NeuronApp(QMainWindow):
         zoom_layout.addStretch()
         nav_layout.addLayout(zoom_layout)
 
+        # Time slider for scrolling
+        slider_layout = QHBoxLayout()
+        slider_layout.addWidget(QLabel("Position:"))
+        self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider.setMinimum(0)
+        self.time_slider.setMaximum(1000)
+        self.time_slider.setFixedHeight(25)  # Fixed slider height to prevent stretching
+        self.time_slider.valueChanged.connect(self.on_time_slider_changed)
+        slider_layout.addWidget(self.time_slider)
+        nav_layout.addLayout(slider_layout)
+
+        nav_group.setLayout(nav_layout)
         nav_group.setLayout(nav_layout)
         nav_group.setMaximumHeight(180)  # Limit navigation group height
         controls_layout.addWidget(nav_group)
 
         # Display controls - more compact
         display_group = QGroupBox("Display Settings")
+        display_group.setMaximumHeight(80)  # Limit display group height
         display_layout = QHBoxLayout()
 
         display_layout.addWidget(QLabel("Channel:"))
@@ -640,6 +662,10 @@ class NeuronApp(QMainWindow):
 
         display_layout.addStretch()
         display_group.setLayout(display_layout)
+        controls_layout.addWidget(display_group)
+
+        # Add controls container to main layout
+        layout.addWidget(controls_container, stretch=0)  # No stretch for controls
         display_group.setMaximumHeight(100)  # Limit display group height
         controls_layout.addWidget(display_group)
 
