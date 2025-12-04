@@ -34,7 +34,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QLineEdit,
                              QFileDialog, QMessageBox, QProgressBar, QTextEdit,
                              QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
-                             QSlider, QTabWidget, QGroupBox, QDialog, QDialogButtonBox)
+                             QSlider, QTabWidget, QGroupBox, QDialog, QDialogButtonBox,
+                             QSizePolicy)
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QColor, QPalette
 
@@ -481,10 +482,18 @@ class NeuronApp(QMainWindow):
         # Matplotlib figure for plotting
         self.figure = Figure(figsize=(12, 6))
         self.canvas = FigureCanvas(self.figure)
-        layout.addWidget(self.canvas)
+        self.canvas.setMinimumHeight(400)  # Ensure minimum canvas height
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.canvas, stretch=3)  # Give canvas most of the space
+
+        # Container for all controls (prevents overlaying)
+        controls_container = QWidget()
+        controls_layout = QVBoxLayout(controls_container)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
 
         # Navigation controls
         nav_group = QGroupBox("Navigation")
+        nav_group.setMaximumHeight(120)  # Limit navigation group height
         nav_layout = QVBoxLayout()
 
         # Time window controls
@@ -572,15 +581,17 @@ class NeuronApp(QMainWindow):
         self.time_slider = QSlider(Qt.Horizontal)
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(1000)
+        self.time_slider.setFixedHeight(25)  # Fixed slider height to prevent stretching
         self.time_slider.valueChanged.connect(self.on_time_slider_changed)
         slider_layout.addWidget(self.time_slider)
         nav_layout.addLayout(slider_layout)
 
         nav_group.setLayout(nav_layout)
-        layout.addWidget(nav_group)
+        controls_layout.addWidget(nav_group)
 
         # Display controls
         display_group = QGroupBox("Display Settings")
+        display_group.setMaximumHeight(80)  # Limit display group height
         display_layout = QHBoxLayout()
 
         display_layout.addWidget(QLabel("Channel:"))
@@ -610,9 +621,21 @@ class NeuronApp(QMainWindow):
         self.spin_separation.valueChanged.connect(self.redraw)
         display_layout.addWidget(self.spin_separation)
 
+        display_layout.addWidget(QLabel("Max Channels:"))
+        self.spin_max_channels = QSpinBox()
+        self.spin_max_channels.setMinimum(1)
+        self.spin_max_channels.setMaximum(128)
+        self.spin_max_channels.setValue(16)
+        self.spin_max_channels.setToolTip("Maximum number of channels to display in multi-channel mode")
+        self.spin_max_channels.valueChanged.connect(self.redraw)
+        display_layout.addWidget(self.spin_max_channels)
+
         display_layout.addStretch()
         display_group.setLayout(display_layout)
-        layout.addWidget(display_group)
+        controls_layout.addWidget(display_group)
+
+        # Add controls container to main layout
+        layout.addWidget(controls_container, stretch=0)  # No stretch for controls
 
         self.tab_widget.addTab(panel, "Display")
 
@@ -1658,8 +1681,8 @@ class NeuronApp(QMainWindow):
                 channels_to_plot = [channel_to_show - 1]
                 single_channel_mode = True
             else:
-                # Multi-channel mode - show up to 16 channels
-                max_channels_to_display = min(num_channels, 16)
+                # Multi-channel mode - use user-specified max channels
+                max_channels_to_display = min(num_channels, self.spin_max_channels.value())
                 channels_to_plot = list(range(max_channels_to_display))
                 single_channel_mode = False
 
