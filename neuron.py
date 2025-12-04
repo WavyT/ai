@@ -335,6 +335,12 @@ class NeuronApp(QMainWindow):
         self.video = VideoSettings()
         self.file_settings = FileSettings()
 
+        # Time window state for navigation
+        self.time_start = 0.0  # Start time in samples
+        self.time_end = 1000.0  # End time in samples
+        self.time_duration = 1000.0  # Duration in samples
+        self.sampling_rate = 1000.0  # Default sampling rate in Hz
+
         # Timers
         self.timers = {}
 
@@ -473,34 +479,140 @@ class NeuronApp(QMainWindow):
         layout = QVBoxLayout(panel)
 
         # Matplotlib figure for plotting
-        self.figure = Figure(figsize=(12, 8))
+        self.figure = Figure(figsize=(12, 6))
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
 
+        # Navigation controls
+        nav_group = QGroupBox("Navigation")
+        nav_layout = QVBoxLayout()
+
+        # Time window controls
+        time_layout = QHBoxLayout()
+        time_layout.addWidget(QLabel("Start:"))
+        self.spin_time_start = QDoubleSpinBox()
+        self.spin_time_start.setDecimals(3)
+        self.spin_time_start.setSuffix(" s")
+        self.spin_time_start.valueChanged.connect(self.on_time_start_changed)
+        time_layout.addWidget(self.spin_time_start)
+
+        time_layout.addWidget(QLabel("Duration:"))
+        self.spin_time_duration = QDoubleSpinBox()
+        self.spin_time_duration.setDecimals(3)
+        self.spin_time_duration.setSuffix(" s")
+        self.spin_time_duration.setValue(1.0)
+        self.spin_time_duration.setMinimum(0.01)
+        self.spin_time_duration.setMaximum(1000)
+        self.spin_time_duration.valueChanged.connect(self.on_time_duration_changed)
+        time_layout.addWidget(self.spin_time_duration)
+
+        time_layout.addWidget(QLabel("End:"))
+        self.spin_time_end = QDoubleSpinBox()
+        self.spin_time_end.setDecimals(3)
+        self.spin_time_end.setSuffix(" s")
+        self.spin_time_end.setValue(1.0)
+        self.spin_time_end.valueChanged.connect(self.on_time_end_changed)
+        time_layout.addWidget(self.spin_time_end)
+
+        nav_layout.addLayout(time_layout)
+
+        # Navigation buttons
+        nav_btn_layout = QHBoxLayout()
+
+        self.btn_jump_start = QPushButton("|◀")
+        self.btn_jump_start.setToolTip("Jump to start")
+        self.btn_jump_start.clicked.connect(self.jump_to_start)
+        nav_btn_layout.addWidget(self.btn_jump_start)
+
+        self.btn_backward_full = QPushButton("◀◀")
+        self.btn_backward_full.setToolTip("Backward full duration")
+        self.btn_backward_full.clicked.connect(self.backward_full)
+        nav_btn_layout.addWidget(self.btn_backward_full)
+
+        self.btn_backward_half = QPushButton("◀")
+        self.btn_backward_half.setToolTip("Backward half duration")
+        self.btn_backward_half.clicked.connect(self.backward_half)
+        nav_btn_layout.addWidget(self.btn_backward_half)
+
+        self.btn_forward_half = QPushButton("▶")
+        self.btn_forward_half.setToolTip("Forward half duration")
+        self.btn_forward_half.clicked.connect(self.forward_half)
+        nav_btn_layout.addWidget(self.btn_forward_half)
+
+        self.btn_forward_full = QPushButton("▶▶")
+        self.btn_forward_full.setToolTip("Forward full duration")
+        self.btn_forward_full.clicked.connect(self.forward_full)
+        nav_btn_layout.addWidget(self.btn_forward_full)
+
+        self.btn_jump_end = QPushButton("▶|")
+        self.btn_jump_end.setToolTip("Jump to end")
+        self.btn_jump_end.clicked.connect(self.jump_to_end)
+        nav_btn_layout.addWidget(self.btn_jump_end)
+
+        nav_layout.addLayout(nav_btn_layout)
+
+        # Zoom controls
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("Zoom:"))
+
+        self.btn_zoom_in = QPushButton("Zoom In [+]")
+        self.btn_zoom_in.clicked.connect(self.zoom_in_time)
+        zoom_layout.addWidget(self.btn_zoom_in)
+
+        self.btn_zoom_out = QPushButton("Zoom Out [-]")
+        self.btn_zoom_out.clicked.connect(self.zoom_out_time)
+        zoom_layout.addWidget(self.btn_zoom_out)
+
+        zoom_layout.addStretch()
+        nav_layout.addLayout(zoom_layout)
+
+        # Time slider for scrolling
+        slider_layout = QHBoxLayout()
+        slider_layout.addWidget(QLabel("Position:"))
+        self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider.setMinimum(0)
+        self.time_slider.setMaximum(1000)
+        self.time_slider.valueChanged.connect(self.on_time_slider_changed)
+        slider_layout.addWidget(self.time_slider)
+        nav_layout.addLayout(slider_layout)
+
+        nav_group.setLayout(nav_layout)
+        layout.addWidget(nav_group)
+
         # Display controls
-        control_layout = QHBoxLayout()
+        display_group = QGroupBox("Display Settings")
+        display_layout = QHBoxLayout()
 
-        control_layout.addWidget(QLabel("Channel:"))
+        display_layout.addWidget(QLabel("Channel:"))
         self.spin_channel = QSpinBox()
-        self.spin_channel.setMinimum(1)
-        self.spin_channel.setMaximum(32)
+        self.spin_channel.setMinimum(0)
+        self.spin_channel.setMaximum(128)
+        self.spin_channel.setSpecialValueText("All")
         self.spin_channel.valueChanged.connect(self.redraw)
-        control_layout.addWidget(self.spin_channel)
+        display_layout.addWidget(self.spin_channel)
 
-        control_layout.addWidget(QLabel("Gain:"))
+        display_layout.addWidget(QLabel("Gain:"))
         self.spin_gain = QDoubleSpinBox()
-        self.spin_gain.setMinimum(0.1)
+        self.spin_gain.setDecimals(2)
+        self.spin_gain.setMinimum(0.01)
         self.spin_gain.setMaximum(1000)
         self.spin_gain.setValue(1.0)
         self.spin_gain.valueChanged.connect(self.redraw)
-        control_layout.addWidget(self.spin_gain)
+        display_layout.addWidget(self.spin_gain)
 
-        self.chk_show_spikes = QCheckBox("Show Spikes")
-        self.chk_show_spikes.stateChanged.connect(self.redraw)
-        control_layout.addWidget(self.chk_show_spikes)
+        display_layout.addWidget(QLabel("Separation:"))
+        self.spin_separation = QDoubleSpinBox()
+        self.spin_separation.setDecimals(2)
+        self.spin_separation.setMinimum(0.5)
+        self.spin_separation.setMaximum(5.0)
+        self.spin_separation.setValue(1.5)
+        self.spin_separation.setToolTip("Vertical spacing between channels")
+        self.spin_separation.valueChanged.connect(self.redraw)
+        display_layout.addWidget(self.spin_separation)
 
-        control_layout.addStretch()
-        layout.addLayout(control_layout)
+        display_layout.addStretch()
+        display_group.setLayout(display_layout)
+        layout.addWidget(display_group)
 
         self.tab_widget.addTab(panel, "Display")
 
@@ -708,6 +820,122 @@ class NeuronApp(QMainWindow):
 
 
     # ========================================================================
+    # TIME NAVIGATION FUNCTIONS
+    # ========================================================================
+
+    def update_time_window(self, start=None, end=None, duration=None):
+        """Update time window parameters"""
+        total_samples = len(self.meting.adc) if len(self.meting.adc) > 0 else 1000
+
+        if start is not None:
+            self.time_start = max(0, min(start, total_samples))
+        if duration is not None:
+            self.time_duration = max(10, min(duration, total_samples))
+        if end is not None:
+            self.time_end = max(self.time_duration, min(end, total_samples))
+
+        # Ensure consistency
+        if start is not None and duration is not None:
+            self.time_end = min(self.time_start + self.time_duration, total_samples)
+        elif start is not None and end is not None:
+            self.time_duration = self.time_end - self.time_start
+        elif duration is not None and end is not None:
+            self.time_start = max(0, self.time_end - self.time_duration)
+
+        # Update GUI controls (block signals to avoid recursion)
+        self.spin_time_start.blockSignals(True)
+        self.spin_time_end.blockSignals(True)
+        self.spin_time_duration.blockSignals(True)
+
+        self.spin_time_start.setValue(self.time_start / self.sampling_rate)
+        self.spin_time_end.setValue(self.time_end / self.sampling_rate)
+        self.spin_time_duration.setValue(self.time_duration / self.sampling_rate)
+
+        self.spin_time_start.blockSignals(False)
+        self.spin_time_end.blockSignals(False)
+        self.spin_time_duration.blockSignals(False)
+
+        # Update slider
+        if total_samples > self.time_duration:
+            slider_pos = int(1000 * self.time_start / (total_samples - self.time_duration))
+            self.time_slider.blockSignals(True)
+            self.time_slider.setValue(slider_pos)
+            self.time_slider.blockSignals(False)
+
+    def on_time_start_changed(self, value):
+        """Handle start time change"""
+        start_samples = value * self.sampling_rate
+        self.update_time_window(start=start_samples)
+        self.redraw()
+
+    def on_time_end_changed(self, value):
+        """Handle end time change"""
+        end_samples = value * self.sampling_rate
+        self.update_time_window(end=end_samples)
+        self.redraw()
+
+    def on_time_duration_changed(self, value):
+        """Handle duration change"""
+        duration_samples = value * self.sampling_rate
+        self.update_time_window(duration=duration_samples)
+        self.redraw()
+
+    def on_time_slider_changed(self, value):
+        """Handle time slider change"""
+        total_samples = len(self.meting.adc) if len(self.meting.adc) > 0 else 1000
+        if total_samples > self.time_duration:
+            start = (value / 1000.0) * (total_samples - self.time_duration)
+            self.update_time_window(start=start)
+            self.redraw()
+
+    def jump_to_start(self):
+        """Jump to start of recording"""
+        self.update_time_window(start=0)
+        self.redraw()
+
+    def jump_to_end(self):
+        """Jump to end of recording"""
+        total_samples = len(self.meting.adc) if len(self.meting.adc) > 0 else 1000
+        self.update_time_window(start=total_samples - self.time_duration)
+        self.redraw()
+
+    def forward_half(self):
+        """Move forward by half duration"""
+        step = self.time_duration * 0.5
+        self.update_time_window(start=self.time_start + step)
+        self.redraw()
+
+    def forward_full(self):
+        """Move forward by full duration"""
+        self.update_time_window(start=self.time_start + self.time_duration)
+        self.redraw()
+
+    def backward_half(self):
+        """Move backward by half duration"""
+        step = self.time_duration * 0.5
+        self.update_time_window(start=self.time_start - step)
+        self.redraw()
+
+    def backward_full(self):
+        """Move backward by full duration"""
+        self.update_time_window(start=self.time_start - self.time_duration)
+        self.redraw()
+
+    def zoom_in_time(self):
+        """Zoom in (reduce visible duration by 50%)"""
+        new_duration = self.time_duration * 0.5
+        center = self.time_start + self.time_duration * 0.5
+        self.update_time_window(start=center - new_duration * 0.5, duration=new_duration)
+        self.redraw()
+
+    def zoom_out_time(self):
+        """Zoom out (increase visible duration by 100%)"""
+        new_duration = self.time_duration * 2.0
+        center = self.time_start + self.time_duration * 0.5
+        self.update_time_window(start=center - new_duration * 0.5, duration=new_duration)
+        self.redraw()
+
+    # ========================================================================
     # DAQ HARDWARE LAYER
     # ========================================================================
 
@@ -888,6 +1116,18 @@ class NeuronApp(QMainWindow):
             )
             self.meting.ADC.append(channel)
 
+        # Initialize time window
+        self.sampling_rate = sampling_rate
+        self.time_start = 0
+        self.time_duration = min(1000, max_samples)  # 1 second or less
+        self.time_end = self.time_duration
+
+        # Update time controls
+        self.spin_time_start.setMaximum(max_samples / sampling_rate)
+        self.spin_time_end.setMaximum(max_samples / sampling_rate)
+        self.spin_time_duration.setMaximum(max_samples / sampling_rate)
+        self.update_time_window(start=0, duration=self.time_duration)
+
         self.statusBar().showMessage(
             f'Loaded {loader.num_channels} channels, {max_samples} samples @ {sampling_rate:.1f} Hz'
         )
@@ -974,6 +1214,19 @@ class NeuronApp(QMainWindow):
                     color='k'
                 )
                 self.meting.ADC.append(channel)
+
+        # Initialize time window after loading MAT file
+        num_samples = self.meting.adc.shape[0]
+        self.sampling_rate = 1000.0  # Default 1kHz, adjust if metadata available
+        self.time_start = 0
+        self.time_duration = min(int(self.sampling_rate), num_samples)  # 1 second
+        self.time_end = self.time_duration
+
+        # Update time controls
+        self.spin_time_start.setMaximum(num_samples / self.sampling_rate)
+        self.spin_time_end.setMaximum(num_samples / self.sampling_rate)
+        self.spin_time_duration.setMaximum(num_samples / self.sampling_rate)
+        self.update_time_window(start=0, duration=self.time_duration)
 
 
     def load_h5_file(self, filename: str):
@@ -1359,19 +1612,39 @@ class NeuronApp(QMainWindow):
     # ========================================================================
 
     def redraw(self):
-        """Redraw data display - multichannel EEG stacked view"""
+        """Redraw data display - multichannel EEG stacked view with time navigation"""
         if len(self.meting.adc) == 0:
             return
 
         self.figure.clear()
 
-        data = self.meting.adc
+        full_data = self.meting.adc
 
-        if data.ndim == 1:
+        # Extract time window
+        start_idx = int(self.time_start)
+        end_idx = int(self.time_end)
+        end_idx = min(end_idx, len(full_data))
+        start_idx = max(0, min(start_idx, end_idx - 1))
+
+        data = full_data[start_idx:end_idx, :]
+
+        if data.shape[0] == 0:
+            return
+
+        # Get display parameters
+        gain = self.spin_gain.value()
+        channel_to_show = self.spin_channel.value()  # 0 = all channels
+        separation_factor = self.spin_separation.value()
+
+        # Create time axis in seconds
+        time_axis = (np.arange(data.shape[0]) + start_idx) / self.sampling_rate
+
+        if data.ndim == 1 or data.shape[1] == 1:
             # Single channel
             ax = self.figure.add_subplot(111)
-            ax.plot(data, 'k-', linewidth=0.5)
-            ax.set_xlabel('Sample')
+            channel_data = data.flatten() * gain
+            ax.plot(time_axis, channel_data, 'k-', linewidth=0.6)
+            ax.set_xlabel('Time (s)')
             ax.set_ylabel('Amplitude')
             ax.set_title('Data Trace')
             ax.grid(True, alpha=0.3)
@@ -1379,59 +1652,60 @@ class NeuronApp(QMainWindow):
             # Multi-channel EEG display - stacked view
             num_samples, num_channels = data.shape
 
-            # Get display parameters
-            gain = self.spin_gain.value()
-            channel_to_show = self.spin_channel.value() - 1  # Convert to 0-indexed
-
-            # Determine how many channels to display
-            max_channels_to_display = min(num_channels, 16)  # Limit to 16 for readability
-
-            # If specific channel selected and within range, show only that channel
-            if 0 <= channel_to_show < num_channels:
-                channels_to_plot = [channel_to_show]
+            # Determine which channels to display
+            if channel_to_show > 0 and channel_to_show <= num_channels:
+                # Single channel mode
+                channels_to_plot = [channel_to_show - 1]
                 single_channel_mode = True
             else:
-                # Show multiple channels
+                # Multi-channel mode - show up to 16 channels
+                max_channels_to_display = min(num_channels, 16)
                 channels_to_plot = list(range(max_channels_to_display))
                 single_channel_mode = False
 
             ax = self.figure.add_subplot(111)
 
             if single_channel_mode:
-                # Single channel view
+                # Single channel view with proper scaling
                 channel_data = data[:, channels_to_plot[0]] * gain
-                time_axis = np.arange(len(channel_data))
                 ax.plot(time_axis, channel_data, 'k-', linewidth=0.8)
-                ax.set_xlabel('Sample')
+                ax.set_xlabel('Time (s)')
                 ax.set_ylabel(f'Amplitude (Ch {channels_to_plot[0]+1})')
-                ax.set_title(f'Channel {channels_to_plot[0]+1}')
+                ax.set_title(f'Channel {channels_to_plot[0]+1} - Gain: {gain:.2f}x')
                 ax.grid(True, alpha=0.3)
             else:
                 # Multi-channel stacked view (EEG style)
-                time_axis = np.arange(num_samples)
+                # Calculate channel separation based on data range
+                data_subset = data[:, channels_to_plot]
+                data_range = np.ptp(data_subset)  # peak-to-peak
 
-                # Calculate channel separation
-                data_range = np.ptp(data[:, channels_to_plot])  # peak-to-peak
-                channel_separation = data_range * 1.5 / gain
+                if data_range == 0:
+                    data_range = 1.0
 
-                colors = plt.cm.tab10(np.linspace(0, 1, len(channels_to_plot)))
+                channel_separation = data_range * separation_factor * gain
+
+                colors = plt.cm.tab20(np.linspace(0, 1, len(channels_to_plot)))
 
                 for i, ch_idx in enumerate(channels_to_plot):
                     offset = i * channel_separation
                     channel_data = data[:, ch_idx] * gain + offset
 
                     ax.plot(time_axis, channel_data, '-',
-                           linewidth=0.6, color=colors[i],
-                           label=f'Ch{ch_idx+1}')
+                           linewidth=0.5, color=colors[i],
+                           label=f'Ch{ch_idx+1}', alpha=0.8)
 
                     # Add channel label on the left
-                    ax.text(-num_samples*0.02, offset, f'Ch{ch_idx+1}',
-                           verticalalignment='center', fontsize=8)
+                    y_pos = offset
+                    ax.text(time_axis[0] - (time_axis[-1] - time_axis[0]) * 0.015, y_pos,
+                           f'Ch{ch_idx+1}',
+                           verticalalignment='center', fontsize=9,
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
 
-                ax.set_xlabel('Sample')
+                ax.set_xlabel('Time (s)')
                 ax.set_ylabel('Channels (stacked)')
-                ax.set_title(f'Multichannel EEG ({len(channels_to_plot)} channels, gain={gain:.2f}x)')
-                ax.set_xlim(0, num_samples)
+                ax.set_title(f'Multichannel EEG - {len(channels_to_plot)} channels, '
+                           f'Gain: {gain:.2f}x, Sep: {separation_factor:.2f}x')
+                ax.set_xlim(time_axis[0], time_axis[-1])
                 ax.grid(True, alpha=0.2, axis='x')
 
                 # Remove y-axis ticks for stacked view
