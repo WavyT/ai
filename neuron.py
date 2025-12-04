@@ -655,11 +655,6 @@ class NeuronApp(QMainWindow):
         display_group.setLayout(display_layout)
         controls_layout.addWidget(display_group)
 
-        # Add controls container to main layout
-        layout.addWidget(controls_container, stretch=0)  # No stretch for controls
-        display_group.setMaximumHeight(100)  # Limit display group height
-        controls_layout.addWidget(display_group)
-
         # Add controls container with no stretch - it stays at natural size
         main_layout.addWidget(controls_widget, stretch=0)
 
